@@ -1,0 +1,9 @@
+{
+  "name": "ValheimNavigator",
+  "version_number": "0.1.0",
+  "website_url": "https://github.com/Ononononoki/ValheimNavigator",
+  "description": "Beta. Two in one: an interactive world map and a route navigator. Search and filter locations on the large map, then follow a walking and sailing route there with your ship, portals and the wind. Client side.",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2351"
+  ]
+}
