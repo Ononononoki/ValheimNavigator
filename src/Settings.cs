@@ -11,6 +11,9 @@ namespace ValheimNavigator
         internal static ConfigEntry<bool> IncludeUnexplored;
         internal static ConfigEntry<bool> PortalsOn;
         internal static ConfigEntry<bool> SearchPins;
+        internal static ConfigEntry<bool> ShareLocations, ShareNavigation;
+        internal static ConfigEntry<float> SyncSeconds, SyncTimeout;
+        internal static ConfigEntry<int> SyncKilobytes;
         internal static ConfigEntry<bool> Beds, Vehicles, Tombstones, Tamed, Chests, Contents, CursorTerrain;
         internal static ConfigEntry<float> RouteRefresh, OffRouteMeters, TeleportMeters, RouteRebuildSeconds, SearchWeight;
         internal static ConfigEntry<bool> MiniRoute;
@@ -74,6 +77,11 @@ namespace ValheimNavigator
         internal static void Bind(ConfigFile config)
         {
             _config = config;
+            ShareLocations = config.Bind("Multiplayer", "ShareLocations", true, "When hosting, share the world's location list with requesting Navigator players. Does not share personal pins, exploration or completion marks.");
+            ShareNavigation = config.Bind("Multiplayer", "ShareNavigation", true, "When hosting, also share portal endpoints and ship positions with requesting Navigator players. Does not share inventories.");
+            SyncSeconds = Number(config, "Multiplayer", "RefreshSeconds", 60f, 10f, 600f, "How often a supported host is asked for changed locations and navigation objects.");
+            SyncTimeout = Number(config, "Multiplayer", "TimeoutSeconds", 15f, 5f, 120f, "How long a guest waits without data before showing limited mode. Local routes remain usable.");
+            SyncKilobytes = config.Bind("Multiplayer", "KilobytesPerFrame", 48, new ConfigDescription("Host transfer budget shared by all requesting players, in kilobytes per frame.", new AcceptableValueRange<int>(24, 240)));
             AutoMark = config.Bind("Done", "AutoMark", true,
                 "Mark a location done when you arrive at it. Only kinds you searched are marked, and only the categories switched on under Auto mark.");
             NearestPin = config.Bind("Pins", "NearestPin", true,

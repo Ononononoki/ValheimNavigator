@@ -6,7 +6,7 @@ namespace ValheimNavigator
     // the "navigator" console command, the same index and done list as the panel
     internal static class Commands
     {
-        private const string Usage = "navigator count | types [text] | nearest <type> | done | undo | reset <type>";
+        private const string Usage = "navigator count | types [text] | nearest <type> | done | undo | reset <type> | sync | importlegacy";
         private const int ListLimit = 40;
         private static bool _registered;
 
@@ -23,6 +23,7 @@ namespace ValheimNavigator
             if (!Plugin.Enabled.Value) { say.AddString("Valheim Navigator is off in its config."); return; }
             string sub = args.Length > 1 ? args[1].ToLowerInvariant() : "";
             string rest = args.Length > 2 ? string.Join(" ", args.Args.Skip(2)) : "";
+            if (sub == "sync") { WorldSync.Retry(); say.AddString(WorldSync.Status); return; }
             if (!Session.BuildNow())
             {
                 say.AddString(Session.Problem ?? "Valheim Navigator has no location list yet, load a world first.");
@@ -37,6 +38,7 @@ namespace ValheimNavigator
                 case "done": Done(say); break;
                 case "undo": Undo(say); break;
                 case "reset": Reset(say, rest); break;
+                case "importlegacy": say.AddString("Imported " + Session.ImportLegacy() + " matching completion marks. Original files were kept."); break;
                 default: say.AddString(Usage); break;
             }
         }

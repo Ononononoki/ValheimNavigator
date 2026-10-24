@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <Compile Remove="test\**" />
+    <Compile Remove="diagnostics\**" />
+    <Compile Remove="candidates\**" />
     <Reference Include="BepInEx"><HintPath>$(ProfilePath)\BepInEx\core\BepInEx.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="0Harmony"><HintPath>$(ProfilePath)\BepInEx\core\0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="assembly_valheim"><HintPath>$(Managed)\assembly_valheim.dll</HintPath><Private>false</Private></Reference>

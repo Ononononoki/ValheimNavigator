@@ -13,7 +13,7 @@ namespace ValheimNavigator
         private const float PollSeconds = 1f;
 
         internal static List<Entry> Entries;
-        internal static Dictionary<string, KindData> Kinds;
+        internal static Dictionary<string, KindData> Kinds = new Dictionary<string, KindData>();
         internal static List<string> Unclassified = new List<string>();
         internal static double BuildMilliseconds;
         internal static double WorstSliceMilliseconds;
@@ -30,12 +30,17 @@ namespace ValheimNavigator
         private static string _signature = "";
         private static string _world;
         private static ZoneSystem _zone;
+        private static long _uid;
+        private static string _legacy;
+        private static int _remoteVersion = -1;
         private static float _poll;
         private static float _arrival;
         private static int _slices;
         private static Func<Minimap, Vector3, bool> _explored;
 
         internal static bool Ready => Entries != null;
+        internal static bool Active => _zone != null;
+        internal static string Status => Ready ? "World search is ready." : Building ? "Building the location list." : Problem ?? "Load a world first.";
 
         internal static bool Building => _builder != null;
 
@@ -68,46 +73,71 @@ namespace ValheimNavigator
             var zone = ZoneSystem.instance;
             if (zone == null)
             {
-                if (Ready || Building) Reset();
+                if (Ready || Building || _world != null) { Panel.Find?.WorldChanged(); Reset(); Navigator.Clear(); Portals.Forget(); KnownWorld.Forget(); }
                 return;
             }
-            if (Player.m_localPlayer == null || !zone.LocationsGenerated) return;
+            if (Player.m_localPlayer == null) return;
             string world = ZNet.instance != null ? ZNet.instance.GetWorldName() : "";
-            if ((Ready || Building) && world == _world && ReferenceEquals(zone, _zone)) return;
+            long uid = ZNet.instance != null ? ZNet.instance.GetWorldUID() : 0L;
+            if (!ReferenceEquals(zone, _zone) || uid != _uid || world != _world)
+            {
+                if (_zone != null) { Panel.Find?.WorldChanged(); Navigator.Clear(); Portals.Forget(); KnownWorld.Forget(); }
+                Reset(); _zone = zone; _world = world; _uid = uid;
+                string folder = Path.Combine(BepInEx.Paths.ConfigPath, "ValheimNavigator"), file = DoneStore.FileFor(folder, world, uid);
+                Store = new DoneStore(file);
+                // a world without its own done file yet takes the marks of its old name file once, the old file stays (0.1.0 used names)
+                _legacy = uid != 0 && !File.Exists(file) && File.Exists(DoneStore.FileFor(folder, world)) ? DoneStore.FileFor(folder, world) : null;
+                Version++;
+            }
+            if (ZNet.instance != null && !ZNet.instance.IsServer())
+            {
+                if (WorldSync.Version != _remoteVersion)
+                {
+                    _remoteVersion = WorldSync.Version;
+                    if (WorldSync.World == uid && WorldSync.Locations != null) Begin(WorldSync.Locations);
+                    else if (Ready || Building) { Entries = null; Kinds = new Dictionary<string, KindData>(); _builder = null; Version++; }
+                }
+                Problem = WorldSync.Status;
+                return;
+            }
+            if (Ready || Building) return;
+            if (!zone.LocationsGenerated) { Problem = "World locations are still being generated. Pins and manual routes are available."; return; }
             Start(world, zone);
         }
 
         private static void Reset()
         {
             Entries = null;
-            Kinds = null;
+            Kinds = new Dictionary<string, KindData>();
             _builder = null;
             _signature = "";
             _world = null;
             _zone = null;
+            _uid = 0; _remoteVersion = -1;
             Store = null;
             Last = null;
             LastDone = null;
             Tracked.Clear();
+            Problem = null;
         }
 
         private static void Start(string world, ZoneSystem zone)
         {
             var raw = LocationIndex.FromGame();
-            if (raw == null || raw.Count == 0)
+            if (raw == null)
             {
-                Problem = "Valheim Navigator has no location list. Load a world you host or play alone, a client on a dedicated server gets none.";
+                Problem = "World locations are not available. Pins and manual routes are available.";
                 return;
-            }
-            bool newWorld = world != _world || !ReferenceEquals(zone, _zone);
-            if (newWorld)
-            {
-                Reset();
-                Store = new DoneStore(DoneStore.FileFor(Path.Combine(BepInEx.Paths.ConfigPath, "ValheimNavigator"), world));
             }
             _world = world;
             _zone = zone;
             _signature = LocationIndex.Signature();
+            Begin(raw);
+        }
+
+        // a replacement catalog is built separately, personal progress is applied only when it is complete
+        private static void Begin(List<Raw> raw)
+        {
             _builder = new IndexBuilder(raw);
             BuildMilliseconds = 0;
             WorstSliceMilliseconds = 0;
@@ -128,6 +158,12 @@ namespace ValheimNavigator
         private static void Finish()
         {
             var entries = _builder.Entries;
+            if (_legacy != null)
+            {
+                int imported = Store.ImportLegacy(_legacy, entries);
+                if (imported > 0) Plugin.Log.LogInfo("done marks taken over from the old world name file, " + imported + " locations");
+                _legacy = null;
+            }
             foreach (var entry in entries)
             {
                 entry.Done = Store.Contains(entry);
@@ -150,6 +186,7 @@ namespace ValheimNavigator
         // the map opens: a changed location list (a site was placed) builds the index again, the old one stays usable meanwhile
         internal static void EnsureFresh()
         {
+            if (ZNet.instance != null && !ZNet.instance.IsServer()) { Poll(); return; }
             if (Building) return;
             if (!Ready) { Poll(); return; }
             var zone = ZoneSystem.instance;
@@ -165,6 +202,19 @@ namespace ValheimNavigator
                 while (_builder != null) { _builder.Step(double.MaxValue); Finish(); }
             }
             return Ready;
+        }
+
+        internal static int ImportLegacy()
+        {
+            if (!Ready || Store == null || _uid == 0) return 0;
+            string legacy = DoneStore.FileFor(Path.Combine(BepInEx.Paths.ConfigPath, "ValheimNavigator"), _world);
+            int count = Store.ImportLegacy(legacy, Entries);
+            foreach (var kind in Kinds.Values)
+            {
+                kind.Done = 0;
+                foreach (var entry in kind.Items) { entry.Done = Store.Contains(entry); if (entry.Done) kind.Done++; }
+            }
+            Version++; Layers.Dirty(); return count;
         }
 
         internal static Vector3? PlayerPosition()

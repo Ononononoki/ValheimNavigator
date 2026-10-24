@@ -12,7 +12,7 @@ namespace ValheimNavigator
     {
         public const string ModGuid = "onononoki.ValheimNavigator";
         public const string ModName = "ValheimNavigator";
-        public const string ModVersion = "0.1.0";
+        public const string ModVersion = "0.1.1";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -21,6 +21,8 @@ namespace ValheimNavigator
 
         private void Update()
         {
+            WorldSync.Tick();
+            if (ZNet.instance != null && ZNet.instance.IsDedicated()) { if (Enabled.Value) KnownWorld.Tick(); return; }
             Session.Tick(UnityEngine.Time.deltaTime);
             if (Enabled.Value) { KnownWorld.Tick(); Navigator.Tick(); }
         }

@@ -220,7 +220,7 @@ namespace ValheimNavigator
                 _status.text = "The index holds " + Session.Entries.Count + " locations in " + Session.Kinds.Count + " kinds. It was built in " + Session.BuildMilliseconds.ToString("F0")
                     + " ms, at most " + Session.WorstSliceMilliseconds.ToString("F1") + " ms in one frame.";
             else
-                _status.text = Session.Building ? "Building the location list, it takes a few seconds." : Session.Problem ?? "Load a world first.";
+                _status.text = Session.Status;
             if (Settings.ShowUnexplored.Value) _status.text += "\nUnexplored terrain is shown on the large map and in the overview.";
             _status.text += "\nMist uses the natural mask and loaded clearing sources. Boat clearance uses base depth. Known objects cover generated areas only. Spawn protection is green where loaded, pale where remembered, sand where the radius has not been seen loaded yet.";
             if (KnownWorld.Problem != null) _status.text += "\nKnown-object scan failed. See the log.";

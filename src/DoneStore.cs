@@ -34,6 +34,23 @@ namespace ValheimNavigator
 
         internal int Count => _keys.Count;
 
+        internal static string FileFor(string folder, string world, long uid)
+        {
+            return uid == 0 ? FileFor(folder, world) : Path.Combine(folder, "world_" + uid.ToString("X16") + ".done.txt");
+        }
+
+        // legacy marks are imported once for a world without its own file, or by command, and only for matching locations
+        internal int ImportLegacy(string legacy, IEnumerable<Entry> entries)
+        {
+            if (!File.Exists(legacy) || legacy == _path) return 0;
+            var allowed = new HashSet<string>(entries.Select(e => e.Key));
+            var imported = File.ReadAllLines(legacy).Where(allowed.Contains).Where(k => !_keys.Contains(k)).ToList();
+            if (imported.Count == 0) return 0;
+            if (File.Exists(_path)) File.Copy(_path, _path + ".bak_" + System.DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff"));
+            foreach (string key in imported) _keys.Add(key);
+            Save(); return imported.Count;
+        }
+
         internal bool Contains(Entry entry) => _keys.Contains(entry.Key);
 
         internal bool Mark(Entry entry)

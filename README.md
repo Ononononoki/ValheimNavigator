@@ -6,6 +6,12 @@ A Valheim mod by Onononoki. Get it on Thunderstore: https://thunderstore.io/c/va
 
 The full description, settings and changelog are in [package/README.md](package/README.md) and [package/CHANGELOG.md](package/CHANGELOG.md).
 
+## Multiplayer
+
+Version 0.1.1 adds optional host sharing. Full world search works for guests when the host also runs a compatible Navigator version and allows sharing. Personal routes and completion marks stay local.
+
+Without host support, guests can still use terrain views, manual destinations and available pins, portals and known objects. A clear message explains when the full location list is unavailable. Dedicated servers are not tested yet.
+
 ## Bug reports and feedback
 
 Bug reports and ideas: open an issue at https://github.com/Ononononoki/ValheimNavigator/issues. Please add the route mode, the Detail setting, your mod list and the BepInEx log (`BepInEx/LogOutput.log`).

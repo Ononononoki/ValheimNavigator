@@ -166,6 +166,8 @@ namespace ValheimNavigator
             var go = new GameObject("ValheimNavigator_Markers", typeof(RectTransform), typeof(CanvasRenderer), typeof(RectMask2D));
             go.transform.SetParent(image.transform, false);
             _rect = (RectTransform)go.transform;
+            // a rebuilt map (rejoin, other world) destroyed the old labels with the old layer (friend's test: the marker layer failed)
+            Labels.Clear(); _warned = false; _drawDirty = true;
             _rect.anchorMin = Vector2.zero;
             _rect.anchorMax = Vector2.one;
             _rect.pivot = new Vector2(0.5f, 0.5f);
@@ -445,7 +447,7 @@ namespace ValheimNavigator
         private static void HideLabels(int used)
         {
             for (int i = used; i < Labels.Count; i++)
-                if (Labels[i].gameObject.activeSelf) Labels[i].gameObject.SetActive(false);
+                if (Labels[i] != null && Labels[i].gameObject.activeSelf) Labels[i].gameObject.SetActive(false);
         }
 
         // your portals as dots, and a line between portals that share a name, in the order the game lists them

@@ -197,7 +197,7 @@ namespace ValheimNavigator
 
         internal override void Show()
         {
-            if (!Session.Ready)
+            if (!Session.Active && !Session.Ready)
             {
                 _hits.Clear();
                 _categories = new List<string>();
@@ -212,14 +212,14 @@ namespace ValheimNavigator
                 {
                     _selected = Session.Kinds.TryGetValue(_selected.Kind.Key, out var kind) ? new Hit { Kind = kind } : null;
                     var old = _picked;
-                    _picked = old != null && _selected != null ? _selected.Kind.Items.FirstOrDefault(e => e.X == old.X && e.Z == old.Z) : null;
+                    _picked = old != null && _selected != null ? _selected.Kind.Items.FirstOrDefault(e => e.Prefab == old.Prefab && e.X == old.X && e.Z == old.Z) : null;
                 }
             }
             if (Settings.PortalsOn.Value) Portals.Refresh(Settings.PortalSeconds.Value);
             List();
             Rows();
             if (_selected != null && Session.PlayerPosition() != null) Refind(false);
-            else if (_selected == null) _card.text = "Pick a kind of place.";
+            else if (_selected == null) _card.text = Session.Ready ? "Pick a kind of place." : Session.Status;
         }
 
         private static string TitleOf(string category)
@@ -326,7 +326,7 @@ namespace ValheimNavigator
         {
             _query = text ?? "";
             _page = 0;
-            if (!Session.Ready) return;
+            if (!Session.Active && !Session.Ready) return;
             List();
             Rows();
         }
@@ -419,6 +419,12 @@ namespace ValheimNavigator
             Session.Last = null;
             _card.text = "Pick a kind of place.";
             Rows();
+        }
+
+        internal void WorldChanged()
+        {
+            RemovePin(); _selected = null; _picked = null; _routeLine = null;
+            _hits.Clear(); _categories.Clear(); _version = -1;
         }
 
         // the route arrived at the picked place: its pin goes, the card says so, and nothing is picked until you pick again

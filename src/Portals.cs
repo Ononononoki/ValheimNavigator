@@ -6,6 +6,7 @@ namespace ValheimNavigator
     internal sealed class PortalInfo
     {
         internal string Tag;
+        internal string Id;
         internal float X, Y, Z;
     }
 
@@ -18,6 +19,7 @@ namespace ValheimNavigator
 
         private static readonly int TagHash = "tag".GetStableHashCode();
         private static float _last = -1000f;
+        private static readonly Dictionary<string, int> Positions = new Dictionary<string, int>();
 
         internal static readonly List<PortalInfo> List = new List<PortalInfo>();
 
@@ -31,14 +33,22 @@ namespace ValheimNavigator
             if (now - _last < seconds) return;
             _last = now;
             List.Clear();
+            Positions.Clear();
             var manager = ZDOMan.instance;
             var registry = manager != null ? Registry(manager) : null;
-            if (registry == null) return;
-            foreach (var sector in registry.Values)
+            foreach (var portal in WorldSync.SharedPortals)
+            {
+                Positions[portal.Id] = List.Count;
+                List.Add(new PortalInfo { Id = portal.Id, Tag = portal.Name, X = portal.X, Y = portal.Y, Z = portal.Z });
+            }
+            if (registry != null) foreach (var sector in registry.Values)
                 foreach (var zdo in sector)
                 {
                     var at = zdo.GetPosition();
-                    List.Add(new PortalInfo { Tag = zdo.GetString(TagHash, ""), X = at.x, Y = at.y, Z = at.z });
+                    string id = zdo.m_uid.ToString();
+                    var info = new PortalInfo { Id = id, Tag = zdo.GetString(TagHash, ""), X = at.x, Y = at.y, Z = at.z };
+                    if (Positions.TryGetValue(id, out int index)) List[index] = info;
+                    else { Positions[id] = List.Count; List.Add(info); }
                 }
             Version++;
         }

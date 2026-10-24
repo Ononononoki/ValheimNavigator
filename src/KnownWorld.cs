@@ -11,6 +11,8 @@ namespace ValheimNavigator
     {
         internal float X, Z, Radius;
         internal string Name, Contents, Subtype;
+        internal string Id;
+        internal bool Shared;
         internal int Kind;
         // an ore deposit with some of its areas mined away
         internal bool Mined;
@@ -50,7 +52,7 @@ namespace ValheimNavigator
         internal static bool BoxesChanged;
         private static float _routeData = -1000f;
         // the last scan read sea hazards and ships recently enough for a new route
-        internal static bool RouteFresh => !_busy && Time.unscaledTime - _routeData < Settings.KnownRefresh.Value;
+        internal static bool RouteFresh => _manager != null && _manager == ZDOMan.instance && !_busy && Time.unscaledTime - _routeData < Settings.KnownRefresh.Value;
         private static ZDOMan _manager;
         private static List<ZDO>[] _sectors;
         private static int _sector, _item;
@@ -136,6 +138,24 @@ namespace ValheimNavigator
             }
         }
 
+        internal static void Forget()
+        {
+            _manager = null; _sectors = null; _busy = _route = false; _last = _routeData = -1000f;
+            Kinds.Clear(); Marks.Clear(); Ships.Clear(); Pending.Clear(); PendingShips.Clear(); Obstacles.Clear();
+            PendingBoxes.Clear(); ZonesRead.Clear(); Version++; HazardVersion++;
+        }
+
+        internal static void ApplySharedShips()
+        {
+            Ships.RemoveAll(s => s.Shared);
+            foreach (var ship in WorldSync.SharedShips)
+            {
+                bool known = false;
+                foreach (var local in Ships) if (local.Id == ship.Id) { known = true; break; }
+                if (!known) Ships.Add(new KnownMark { Id = ship.Id, Name = ship.Name, X = ship.X, Z = ship.Z, Kind = 4, Shared = true });
+            }
+        }
+
         internal static void CancelRoute()
         {
             _route = false;
@@ -189,7 +209,7 @@ namespace ValheimNavigator
                     list.Add(mark);
                 }
                 if (signature != _hazardSignature) { _hazardSignature = signature; HazardVersion++; }
-                Ships.Clear(); Ships.AddRange(PendingShips); PendingShips.Clear();
+                Ships.Clear(); Ships.AddRange(PendingShips); PendingShips.Clear(); ApplySharedShips();
                 if (Settings.LoadedTerrain.Value && Settings.RememberedWorld.Value && ZonesRead.Count > 0)
                 {
                     int boxes = PendingBoxes.Count;
@@ -262,7 +282,7 @@ namespace ValheimNavigator
                 ZonesRead.Add(zone);
                 if (kind.Solid) PendingBoxes.Add(BoxOf(zdo, position, kind, zone));
             }
-            if (kind.Ship) PendingShips.Add(new KnownMark { X = position.x, Z = position.z, Name = kind.Prefab, Kind = 4 });
+            if (kind.Ship) PendingShips.Add(new KnownMark { Id = zdo.m_uid.ToString(), X = position.x, Z = position.z, Name = kind.Prefab, Kind = 4 });
             if (Settings.SpawnSafe.Value && kind.Safe)
                 Pending.Add(new KnownMark { X = position.x, Z = position.z, Radius = kind.SafeRadius, Name = kind.Prefab, Kind = 1 });
             if (Settings.Ore.Value && kind.Ore)

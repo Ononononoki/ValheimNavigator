@@ -103,6 +103,8 @@ namespace ValheimNavigator
             _image = picture.GetComponent<RawImage>();
             _image.raycastTarget = false;
             _image.enabled = false;
+            // the last picture goes onto a rebuilt map's layer, without it the layer draws white
+            if (_texture != null) _image.texture = _texture; else _shownUv = default;
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("detailed map view layer built");
         }
 
@@ -215,6 +217,7 @@ namespace ValheimNavigator
         private static Texture2D _fogSource;
 
         private static int _fogFrame = -1;
+        private static bool _fogFormatNoted;
         internal static byte[] FogData => _fog;
         internal static bool FogReady => _fogFull;
         // the game's palette color of a biome index, for the biome view
@@ -231,6 +234,7 @@ namespace ValheimNavigator
             // read in place where the format is known: GetPixels made a 32 KB array per row, about 1 MB a frame while the map was open (test 11)
             int stride = Layout(fog.format, out int red, out _, out _, out _);
             var data = stride > 0 ? fog.GetPixelData<byte>(0) : default;
+            if (stride == 0 && !_fogFormatNoted) { _fogFormatNoted = true; Plugin.Log.LogWarning("fog texture format " + fog.format + " is read row by row, which makes garbage"); }
             for (int i = 0; i < rows; i++)
             {
                 int o = _fogRow * _side;
@@ -250,6 +254,8 @@ namespace ValheimNavigator
                 case TextureFormat.BGRA32: b = 0; g = 1; r = 2; a = 3; return 4;
                 case TextureFormat.RGB24: r = 0; g = 1; b = 2; a = -1; return 3;
                 case TextureFormat.R8: r = g = b = 0; a = -1; return 1;
+                // the game's fog texture is R8G8_UNorm where supported (test 13: it fell back to GetPixels, 22 MB a second of garbage)
+                case TextureFormat.RG16: r = 0; g = 1; b = 1; a = -1; return 2;
                 default: r = g = b = 0; a = -1; return 0;
             }
         }

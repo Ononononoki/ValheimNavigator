@@ -201,7 +201,7 @@ namespace ValheimNavigator
         private void UpdateStatus()
         {
             if (_status == null || Root == null || !Root.activeInHierarchy) return;
-            if (!Session.Ready) _status.text = Session.Building ? "Building the location list, it takes a few seconds." : Session.Problem ?? "Load a world first.";
+            if (!Session.Ready) _status.text = Session.Status;
             else if (Layers.Wanted == 0) _status.text = "Switch a kind on to draw its places on the large map. Hover a dot to see what it is.";
             else
             {
@@ -227,7 +227,7 @@ namespace ValheimNavigator
 
         internal override void Show()
         {
-            if (Session.Ready && _version != Session.Version)
+            if (_version != Session.Version)
             {
                 _version = Session.Version;
                 Rebuild();

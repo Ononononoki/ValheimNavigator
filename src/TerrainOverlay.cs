@@ -100,6 +100,8 @@ namespace ValheimNavigator
                 {
                     _terrain = Layer(map.m_mapImageLarge, "ValheimNavigator_Terrain", 0);
                     _fog = Layer(map.m_mapImageLarge, "ValheimNavigator_Shade", 1);
+                    // a rebuilt map gets the kept pictures, a layer without a texture draws white (friend's test: white map while panning)
+                    if (_texture != null) { _terrain.texture = _texture; _fog.texture = _shade; }
                 }
                 var source = MapAccess.Fog(map);
                 MistClearings.Frame();
