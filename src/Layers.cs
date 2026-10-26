@@ -196,6 +196,7 @@ namespace ValheimNavigator
                     if (_count == _marks.Length) Array.Resize(ref _marks, Math.Max(256, _marks.Length * 2));
                     var e = items[i];
                     if (Settings.SpawnFilter.Value != 0 && e.Placed != (Settings.SpawnFilter.Value == 1)) continue;
+                    if (!ExplorerArea.Visible(e.X, e.Z)) continue;
                     _marks[_count++] = new Mark { U = (e.X / pixel + half) / size, V = (e.Z / pixel + half) / size, Entry = e, Category = category };
                 }
             }
@@ -500,7 +501,7 @@ namespace ValheimNavigator
             foreach (var mark in KnownWorld.Marks)
             {
                 // spawn protection is drawn by its own filled layer
-                if (mark.Kind == 1 || !KnownWorld.Visible(mark)) continue;
+                if (mark.Kind == 1 || !KnownWorld.Drawn(mark)) continue;
                 float x = rect.xMin + ((mark.X / span + 0.5f - uv.x) / uv.width) * rect.width;
                 float y = rect.yMin + ((mark.Z / span + 0.5f - uv.y) / uv.height) * rect.height;
                 if (!rect.Contains(new Vector2(x, y)) || covered && cover.Contains(new Vector2(x, y))) continue;

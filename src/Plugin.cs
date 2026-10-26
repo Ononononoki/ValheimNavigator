@@ -12,7 +12,7 @@ namespace ValheimNavigator
     {
         public const string ModGuid = "onononoki.ValheimNavigator";
         public const string ModName = "ValheimNavigator";
-        public const string ModVersion = "0.1.1";
+        public const string ModVersion = "0.1.2";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -24,7 +24,7 @@ namespace ValheimNavigator
             WorldSync.Tick();
             if (ZNet.instance != null && ZNet.instance.IsDedicated()) { if (Enabled.Value) KnownWorld.Tick(); return; }
             Session.Tick(UnityEngine.Time.deltaTime);
-            if (Enabled.Value) { KnownWorld.Tick(); Navigator.Tick(); }
+            if (Enabled.Value) { ExplorerArea.Tick(); KnownWorld.Tick(); Navigator.Tick(); }
         }
 
         // the mod was called MapSearch before 0.7.7. its cfg and its data folder are copied once to the new names, the old files stay
@@ -55,11 +55,12 @@ namespace ValheimNavigator
         {
             Log = Logger;
             Migrate();
-            Enabled = Config.Bind("General", "Enabled", true,
+            Sections.MoveOld(Config);
+            Enabled = Config.Bind(Sections.General, "Enabled", true,
                 "Search and filters on the large map. Off: the mod does nothing.");
-            LogCounters = Config.Bind("Debug", "LogCounters", false,
+            LogCounters = Config.Bind(Sections.Debug, "LogCounters", false,
                 "Write the index counts and build times to the log.");
-            AutoMarkMeters = Config.Bind("Done", "AutoMarkMeters", 25f,
+            AutoMarkMeters = Config.Bind(Sections.Markers, "AutoMarkMeters", 25f,
                 new ConfigDescription("The distance in meters at which a searched location is marked done when you arrive. Used when AutoMark is on.",
                     new AcceptableValueRange<float>(5f, 200f)));
             Settings.Bind(Config);

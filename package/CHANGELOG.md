@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.2
+
+- Two map modes, asked at the first large map opening. Explorer shows places, markers and routes for the land you explored and what lies close to it or close to you, even a little into the fog. Cartographer knows the whole world.
+- Land read from a cartography table counts as explored (`ExplorerShared`). The map views draw it while the game shows the table's map.
+- Explorer routes can cross open sea.
+- Routes are searched in the background, so the game no longer slows down while one is calculated. The route tables build about three times faster and are kept on disk, so a world seen before has them at once.
+- The minimap shows the chosen map view, as sharp as the large map.
+- Unexplored shade: 0 turns it off, and the same value is lighter than before. The game's cloud look is optional and off by default (`FogClouds`), it does not match the game's fog yet.
+- Faster map view switches (the map picture is kept, mist included), and the Layers page opens without a hitch.
+- A ship farther than `ShipMeters` is used when it lies on explored or cartography land.
+- With ShipPins installed, Navigator draws no ship or cart markers of its own.
+- Moder's power counts as a tailwind on every heading when routes plan sailing, and a weak wind no longer starts reroutes.
+- Spawn-safe areas use each object's own live radius.
+- Settings are grouped into numbered sections. Your values move with them by themselves.
+- Fixed about 300 font warnings in the log and a slow first opening of the Layers page.
+
 ## 0.1.1
 
 - Multiplayer: a guest gets the host's full location search, portals and ships when both use Navigator 0.1.1. Only map data is sent, and the host can turn sharing off.

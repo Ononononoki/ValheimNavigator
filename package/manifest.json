@@ -1,6 +1,6 @@
 {
   "name": "ValheimNavigator",
-  "version_number": "0.1.1",
+  "version_number": "0.1.2",
   "website_url": "https://github.com/Ononononoki/ValheimNavigator",
   "description": "Beta. Interactive world map and route navigator. Search locations and follow walking, sailing and portal routes with wind. Guests can receive world search from a compatible Navigator host.",
   "dependencies": [

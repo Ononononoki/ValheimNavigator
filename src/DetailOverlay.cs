@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -14,7 +15,13 @@ namespace ValheimNavigator
     {
         // about half of a 1440p map view, the bilinear upscale keeps lines smooth and the redraw takes half the work
         private const int MaxPixels = 600000;
-        private const float SettleSeconds = 0.15f;
+        private const float SettleSeconds = 0.08f;
+        // a picture's rows are split over this many background threads at most, a few cores stay free for the game
+        private const int RenderThreads = 6;
+        internal static int Threads => Math.Max(1, Math.Min(RenderThreads, Environment.ProcessorCount - 2));
+        // picture arrays of views no longer kept, reused by the next picture of the same size instead of making garbage
+        private const int SparePictures = 2;
+        private static readonly List<Color32[]> Spare = new List<Color32[]>();
         private const float MinorWidth = 0.9f, MajorWidth = 1.4f, MinorAlpha = 0.55f, MajorAlpha = 0.8f;
         private const float LightLength = 1.9899749f, FlatDot = 1.4f / LightLength;
         private static readonly Color ContourColor = new Color(0.13f, 0.10f, 0.07f, 1f);
@@ -52,7 +59,27 @@ namespace ValheimNavigator
         internal static int Renders;
 
         // explored areas or mist clearings changed, kept pictures are out of date
-        internal static void Dirty() { _dirty = true; Recent.Clear(); }
+        internal static void Dirty()
+        {
+            _dirty = true; _miniDirty = true;
+            foreach (var job in Recent) Keep(job.Pixels);
+            Recent.Clear();
+        }
+
+        private static void Keep(Color32[] pixels)
+        {
+            if (pixels == null || Spare.Count >= SparePictures) return;
+            Spare.Add(pixels);
+        }
+
+        private static Color32[] Take(int length)
+        {
+            int i = Spare.FindIndex(p => p.Length == length);
+            if (i < 0) return new Color32[length];
+            var pixels = Spare[i];
+            Spare.RemoveAt(i);
+            return pixels;
+        }
 
         private static void Hide()
         {
@@ -75,7 +102,7 @@ namespace ValheimNavigator
                 if (uv != _lastUv || size != _lastSize) { _lastUv = uv; _lastSize = size; _moved = Time.unscaledTime; }
                 bool settled = Time.unscaledTime - _moved >= SettleSeconds;
                 bool stale = _dirty || key != _shownKey || uv != _shownUv || size != _shownSize;
-                if (!Settings.ShowUnexplored.Value) RefreshFog(MapAccess.Fog(map));
+                if (!Settings.UnexploredShown) RefreshFog(MapAccess.Fog(map));
                 bool jobCurrent = _job != null && Matches(_job, uv, size, key) && !_dirty;
                 if (settled && stale && !jobCurrent && size.x >= 8f && size.y >= 8f) Start(map, uv, size, key);
                 Collect();
@@ -163,7 +190,9 @@ namespace ValheimNavigator
             int maskStride = mask != null ? Layout(mask.format, out int mr, out int mg, out int mb, out int ma) : Layout(TextureFormat.RFloat, out mr, out mg, out mb, out ma);
             if (mask == null || mask.width != _side) maskStride = 0;
             var maskData = maskStride > 0 ? mask.GetPixelData<byte>(0) : default;
-            while (_cacheRow < _side && clock.Elapsed.TotalMilliseconds < Settings.DetailMilliseconds.Value)
+            // the large map hides the game, so it may take more of the frame (the friend's idea, 24 Oct)
+            float budget = Minimap.IsOpen() ? Math.Max(Settings.DetailMilliseconds.Value, Settings.OpenMapMilliseconds.Value) : Settings.DetailMilliseconds.Value;
+            while (_cacheRow < _side && clock.Elapsed.TotalMilliseconds < budget)
             {
                 int o = _cacheRow * _side;
                 if (rawHeight) for (int x = 0; x < _side; x++) _height[o + x] = heightData[o + x];
@@ -199,7 +228,7 @@ namespace ValheimNavigator
             internal Rect Uv; internal Vector2 Size; internal string Key;
             internal int W, H, View;
             internal float Interval, Mpp, Pixel, Water, Danger, Warning, MaxSlope;
-            internal bool Contours, Mist, Steep, Shallows, Heat, Fogged;
+            internal bool Contours, Mist, Steep, Shallows, Heat, Fogged, Shared;
             internal int[] Cols; internal float[] ColWeights, Wx, Fx;
             internal Color32[] Pixels;
             internal volatile bool Done, Cancel;
@@ -229,20 +258,41 @@ namespace ValheimNavigator
             if (_fogFrame == Time.frameCount) return;
             _fogFrame = Time.frameCount;
             if (fog == null || fog.width != _side || fog.height != _side) { _fogFull = false; return; }
-            if (_fog == null || _fog.Length != _side * _side || fog != _fogSource) { _fog = new byte[_side * _side]; _fogRow = 0; _fogFull = false; _fogSource = fog; }
+            if (_fog == null || _fog.Length != _side * _side || fog != _fogSource) { _fog = new byte[_side * _side]; _fogRow = 0; _fogFull = false; _fogSource = fog; FogWrites++; }
             int rows = _fogFull ? 32 : 256;
             // read in place where the format is known: GetPixels made a 32 KB array per row, about 1 MB a frame while the map was open (test 11)
-            int stride = Layout(fog.format, out int red, out _, out _, out _);
+            // red 0 is explored by you, green 0 by others at a cartography table (Minimap.Explore and ExploreOthers). a byte per texel:
+            // 0 explored by you, 1 unexplored, 2 unexplored by you but explored by others
+            int stride = Layout(fog.format, out int red, out int green, out _, out _);
             var data = stride > 0 ? fog.GetPixelData<byte>(0) : default;
             if (stride == 0 && !_fogFormatNoted) { _fogFormatNoted = true; Plugin.Log.LogWarning("fog texture format " + fog.format + " is read row by row, which makes garbage"); }
             for (int i = 0; i < rows; i++)
             {
                 int o = _fogRow * _side;
-                if (stride > 0) for (int x = 0; x < _side; x++) _fog[o + x] = data[(o + x) * stride + red] > 127 ? (byte)1 : (byte)0;
-                else { var row = fog.GetPixels(0, _fogRow, _side, 1); for (int x = 0; x < _side; x++) _fog[o + x] = row[x].r > 0.5f ? (byte)1 : (byte)0; }
-                if (++_fogRow >= _side) { _fogRow = 0; _fogFull = true; }
+                if (stride > 0) for (int x = 0; x < _side; x++) { int s = (o + x) * stride; Set(o + x, data[s + red] <= 127 ? (byte)0 : stride > 1 && data[s + green] <= 127 ? (byte)2 : (byte)1); }
+                else { var row = fog.GetPixels(0, _fogRow, _side, 1); for (int x = 0; x < _side; x++) Set(o + x, row[x].r <= 0.5f ? (byte)0 : row[x].g <= 0.5f ? (byte)2 : (byte)1); }
+                if (++_fogRow >= _side)
+                {
+                    _fogRow = 0;
+                    // a pass that changed a texel, or the first one, gives a new fog version
+                    if (_fogChanged || !_fogFull) FogVersion++;
+                    _fogFull = true; _fogChanged = false;
+                }
             }
         }
+
+        private static bool _fogChanged;
+        // counts up after each full pass over the fog that found a change, the Explorer area is rebuilt from it
+        internal static int FogVersion;
+
+        private static void Set(int index, byte state)
+        {
+            if (_fog[index] == state) return;
+            _fog[index] = state; _fogChanged = true; FogWrites++;
+        }
+
+        // every texel the fog cache changed so far, the unexplored shade is drawn again only when it moved
+        internal static int FogWrites;
 
         // bytes per texel and the byte offsets of red, green, blue and alpha (-1 without alpha) of 8-bit formats, 0 for any other format
         internal static int Layout(TextureFormat format, out int r, out int g, out int b, out int a)
@@ -266,11 +316,20 @@ namespace ValheimNavigator
         {
             var recent = Recent.Find(j => Matches(j, uv, size, key));
             if (recent != null) { Show(recent); _dirty = false; return; }
-            if (!Settings.ShowUnexplored.Value && !_fogFull) return;
+            if (!Settings.UnexploredShown && !_fogFull) return;
             if (_job != null) _job.Cancel = true;
-            float scale = Mathf.Min(1f, Mathf.Sqrt(MaxPixels / (size.x * size.y)));
+            var job = Prepare(map, uv, size, key, MaxPixels);
+            _job = job; _dirty = false;
+            ThreadPool.QueueUserWorkItem(Run, job);
+        }
+
+        // a picture job for a view of the map texture (uv) shown at size screen pixels, at most maxPixels
+        private static Job Prepare(Minimap map, Rect uv, Vector2 size, string key, int maxPixels)
+        {
+            float scale = Mathf.Min(1f, Mathf.Sqrt(maxPixels / (size.x * size.y)));
             var job = new Job { Uv = uv, Size = size, Key = key, W = Math.Max(8, Mathf.RoundToInt(size.x * scale)), H = Math.Max(8, Mathf.RoundToInt(size.y * scale)) };
-            job.Pixels = new Color32[job.W * job.H];
+            // every pixel of a row is written, so a reused array needs no clearing
+            job.Pixels = Take(job.W * job.H);
             job.Cols = new int[job.W * 4]; job.ColWeights = new float[job.W * 12]; job.Wx = new float[job.W]; job.Fx = new float[job.W];
             job.Pixel = map.m_pixelSize;
             for (int px = 0; px < job.W; px++)
@@ -288,10 +347,116 @@ namespace ValheimNavigator
             job.Interval = !Settings.ContourAuto.Value ? interval : screenPixelsPerMeter >= 0.9f ? Math.Min(interval, 5f) : screenPixelsPerMeter >= 0.35f ? Math.Min(interval, 10f) : interval;
             job.Water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f;
             job.View = Settings.TerrainView.Value; job.Contours = Settings.Contours.Value; job.Mist = Settings.Mist.Value; job.Steep = Settings.Steepness.Value;
-            job.Shallows = Settings.Shallows.Value; job.Heat = Settings.AshlandsHeat.Value; job.Fogged = !Settings.ShowUnexplored.Value;
+            job.Shallows = Settings.Shallows.Value; job.Heat = Settings.AshlandsHeat.Value; job.Fogged = !Settings.UnexploredShown; job.Shared = TerrainOverlay.SharedDrawn;
             job.Danger = Settings.BoatDangerDepth.Value; job.Warning = Math.Max(Settings.BoatWarningDepth.Value, job.Danger); job.MaxSlope = Settings.MaxSlope.Value;
-            _job = job; _dirty = false;
-            ThreadPool.QueueUserWorkItem(Run, job);
+            return job;
+        }
+
+        // the minimap's own sharp picture (test 16: the whole-map picture is about 24 m a pixel there). it covers the small map's view and a
+        // margin around it, so walking does not draw it again every frame. it is drawn again on a background thread when the view leaves
+        // the margin, the zoom or a setting changes, or explored land changed
+        private const int MiniMaxPixels = 250000;
+        private const float MiniMargin = 0.5f;
+        private static RectTransform _miniClip;
+        private static RawImage _miniImage;
+        private static Texture2D _miniTexture;
+        private static Job _miniJob;
+        private static Rect _miniShownUv;
+        private static string _miniShownKey;
+        private static bool _miniDirty = true, _miniWarned;
+        private static int _miniRenders;
+        // the sharp minimap picture covers the small map, the coarse minimap layer is hidden meanwhile
+        internal static bool MiniCovering;
+
+        internal static void MiniFrame(Minimap map)
+        {
+            try
+            {
+                var small = map != null ? map.m_mapImageSmall : null;
+                bool on = small != null && Settings.MinimapTerrain.Value && Settings.Detail.Value && map.m_mode == Minimap.MapMode.Small && TerrainOverlay.Active && _cached;
+                if (!on)
+                {
+                    MiniCovering = false;
+                    if (_miniClip != null && _miniClip.gameObject.activeSelf) _miniClip.gameObject.SetActive(false);
+                    return;
+                }
+                if (_miniClip == null) CreateMini(small);
+                if (!_miniClip.gameObject.activeSelf) _miniClip.gameObject.SetActive(true);
+                var uv = small.uvRect;
+                var size = _miniClip.rect.size;
+                string key = TerrainOverlay.Key();
+                if (!Settings.UnexploredShown) RefreshFog(MapAccess.Fog(map));
+                float zoom = _miniShownUv.width / (1f + 2f * MiniMargin);
+                bool inside = _miniShownUv.width > 0f && Math.Abs(zoom - uv.width) <= uv.width * 0.01f && _miniShownUv.Contains(uv.min) && _miniShownUv.Contains(uv.max);
+                bool stale = _miniDirty || key != _miniShownKey || !inside;
+                if (stale && _miniJob == null && size.x >= 8f && size.y >= 8f && (Settings.UnexploredShown || _fogFull))
+                {
+                    var wide = new Rect(uv.x - uv.width * MiniMargin, uv.y - uv.height * MiniMargin, uv.width * (1f + 2f * MiniMargin), uv.height * (1f + 2f * MiniMargin));
+                    _miniJob = Prepare(map, wide, size * (1f + 2f * MiniMargin), key, MiniMaxPixels);
+                    _miniDirty = false;
+                    ThreadPool.QueueUserWorkItem(Run, _miniJob);
+                }
+                CollectMini();
+                PlaceMini(uv);
+            }
+            catch (Exception ex)
+            {
+                MiniCovering = false;
+                if (!_miniWarned) Plugin.Log.LogWarning("sharp minimap view unavailable: " + ex);
+                _miniWarned = true;
+            }
+        }
+
+        private static void CreateMini(RawImage small)
+        {
+            var go = new GameObject("ValheimNavigator_MiniDetail", typeof(RectTransform), typeof(RectMask2D));
+            go.transform.SetParent(small.transform, false);
+            _miniClip = (RectTransform)go.transform;
+            Ui.Stretch(_miniClip, 0f);
+            // over the coarse minimap picture, under the shades and the game's markers
+            go.transform.SetSiblingIndex(Math.Min(1, small.transform.childCount - 1));
+            var picture = new GameObject("Picture", typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage));
+            picture.transform.SetParent(go.transform, false);
+            var rect = (RectTransform)picture.transform;
+            rect.anchorMin = rect.anchorMax = rect.pivot = Vector2.zero;
+            _miniImage = picture.GetComponent<RawImage>();
+            _miniImage.raycastTarget = false;
+            _miniImage.enabled = false;
+            if (_miniTexture != null) _miniImage.texture = _miniTexture; else _miniShownUv = default;
+            if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("sharp minimap view layer built on " + small.name);
+        }
+
+        private static void CollectMini()
+        {
+            var job = _miniJob;
+            if (job == null || !job.Done) return;
+            _miniJob = null;
+            if (job.Cancel) { Keep(job.Pixels); return; }
+            if (_miniTexture == null || _miniTexture.width != job.W || _miniTexture.height != job.H)
+            {
+                if (_miniTexture != null) UnityEngine.Object.Destroy(_miniTexture);
+                _miniTexture = new Texture2D(job.W, job.H, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
+            }
+            _miniTexture.SetPixelData(job.Pixels, 0);
+            _miniTexture.Apply(false);
+            _miniImage.texture = _miniTexture;
+            _miniShownUv = job.Uv; _miniShownKey = job.Key;
+            Keep(job.Pixels);
+            _miniRenders++;
+            if (Plugin.LogCounters.Value && (_miniRenders <= 3 || _miniRenders % 50 == 0))
+                Plugin.Log.LogInfo("sharp minimap view drawn, " + job.W + "x" + job.H + ", " + job.Milliseconds.ToString("F0") + " ms on a background thread, render " + _miniRenders);
+        }
+
+        // the picture keeps its place on the world while the minimap follows the player
+        private static void PlaceMini(Rect uv)
+        {
+            if (_miniTexture == null || _miniShownUv.width <= 0f || uv.width <= 0f || uv.height <= 0f) { MiniCovering = false; if (_miniImage != null) _miniImage.enabled = false; return; }
+            var rect = _miniClip.rect;
+            var picture = (RectTransform)_miniImage.transform;
+            picture.anchoredPosition = new Vector2((_miniShownUv.x - uv.x) / uv.width * rect.width, (_miniShownUv.y - uv.y) / uv.height * rect.height);
+            picture.sizeDelta = new Vector2(_miniShownUv.width / uv.width * rect.width, _miniShownUv.height / uv.height * rect.height);
+            _miniImage.enabled = true;
+            MiniCovering = _miniShownKey == TerrainOverlay.Key() && _miniShownUv.Contains(uv.min) && _miniShownUv.Contains(uv.max);
         }
 
         private static void Run(object state)
@@ -300,13 +465,23 @@ namespace ValheimNavigator
             var clock = Stopwatch.StartNew();
             try
             {
-                var rowWeights = new float[12];
-                var rowOffsets = new int[4];
-                for (int py = 0; py < job.H && !job.Cancel; py++) Row(job, py, rowWeights, rowOffsets);
+                // rows are shared out over a few threads, each with its own weight buffers
+                Parallel.For(0, job.H, new ParallelOptions { MaxDegreeOfParallelism = Threads }, () => new RowBuffers(), (py, loop, buffers) =>
+                {
+                    if (job.Cancel) loop.Stop();
+                    else Row(job, py, buffers.Weights, buffers.Offsets);
+                    return buffers;
+                }, _ => { });
             }
-            catch (Exception ex) { job.Cancel = true; if (!_warned) Plugin.Log.LogWarning("detailed map view row failed: " + ex.Message); _warned = true; }
+            catch (Exception ex) { job.Cancel = true; if (!_warned) Plugin.Log.LogWarning("detailed map view row failed: " + (ex.InnerException ?? ex).Message); _warned = true; }
             job.Milliseconds = clock.Elapsed.TotalMilliseconds;
             job.Done = true;
+        }
+
+        private sealed class RowBuffers
+        {
+            internal readonly float[] Weights = new float[12];
+            internal readonly int[] Offsets = new int[4];
         }
 
         // the finished picture goes into the texture on the game's thread
@@ -315,10 +490,14 @@ namespace ValheimNavigator
             var job = _job;
             if (job == null || !job.Done) return;
             _job = null;
-            if (job.Cancel) return;
+            if (job.Cancel) { Keep(job.Pixels); return; }
             Show(job);
             Recent.Insert(0, job);
-            if (Recent.Count > RecentViews) Recent.RemoveAt(Recent.Count - 1);
+            if (Recent.Count > RecentViews)
+            {
+                Keep(Recent[Recent.Count - 1].Pixels);
+                Recent.RemoveAt(Recent.Count - 1);
+            }
             Renders++;
             if (Plugin.LogCounters.Value && (Renders <= 3 || Renders % 20 == 0))
                 Plugin.Log.LogInfo("detailed map view drawn, " + job.W + "x" + job.H + ", " + job.Milliseconds.ToString("F0") + " ms on a background thread, render " + Renders);
@@ -331,7 +510,8 @@ namespace ValheimNavigator
                 if (_texture != null) UnityEngine.Object.Destroy(_texture);
                 _texture = new Texture2D(job.W, job.H, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
             }
-            _texture.SetPixels32(job.Pixels);
+            // the picture's bytes go to the texture as they are (RGBA32), without SetPixels32's per-pixel path
+            _texture.SetPixelData(job.Pixels, 0);
             _texture.Apply(false);
             _image.texture = _texture;
             _shownUv = job.Uv; _shownSize = job.Size; _shownKey = job.Key; _interval = job.Interval;
@@ -345,6 +525,28 @@ namespace ValheimNavigator
         }
 
         private static Color Mix(Color a, Color b, float t) { return new Color(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t); }
+
+        // the Simplified view of one texel for the whole-map picture (the minimap, the map while panning), the colors of Row without its
+        // spline blending. gx and gz are slopes per meter, mpp the meters per picture pixel
+        internal static Color SimplifiedTexel(int b, float h, float water, float gx, float gz, float mpp, float forest, float blue, float wx, float wz)
+        {
+            float slope = Mathf.Sqrt(gx * gx + gz * gz), gpx = Mathf.Max(0.001f, slope * mpp), hh = h - water, depth = water - h;
+            bool north = b == 6 && wx * wx + (wz + 4000f) * (wz + 4000f) > 144e6f;
+            float land = Mathf.Clamp01((h - (b == 2 ? water - 2.2f : water)) / gpx + 0.5f);
+            Color ground = north ? North : Land[Math.Min(b, Land.Length - 1)];
+            if (b <= 3 && forest > 0f) { float f = 1f - 0.2f * forest; ground.r *= f * 0.94f; ground.g *= f; ground.b *= f * 0.88f; }
+            if (b != 2 && b != 5 && b != 6) ground = Mix(ground, Sand, 0.45f * Mathf.Clamp01((1.2f - hh) / gpx + 0.5f));
+            float s = Shade(gx, gz, 2.6f);
+            ground.r *= s; ground.g *= s; ground.b *= s;
+            if (b == 5 && blue > 0f) ground = Mix(ground, Lava, Math.Min(1f, blue * 1.15f));
+            float e = Mathf.Pow(Mathf.Clamp01(depth / 45f), 0.55f);
+            Color sea = b == 2 ? new Color((76 - 22 * e) / 255f, (84 - 24 * e) / 255f, (60 - 12 * e) / 255f, 1f)
+                : b == 5 ? new Color((60 - 30 * e) / 255f, (40 - 22 * e) / 255f, (44 - 18 * e) / 255f, 1f)
+                : new Color((78 - 60 * e) / 255f, (132 - 92 * e) / 255f, (142 - 80 * e) / 255f, 1f);
+            var color = Mix(sea, ground, land);
+            color.a = 1f;
+            return color;
+        }
 
         private static void Row(Job job, int py, float[] rowWeights, int[] rowOffsets)
         {
@@ -363,7 +565,7 @@ namespace ValheimNavigator
             {
                 float wx = job.Wx[px];
                 int cn = job.Cols[px * 4 + 1], cn1 = job.Cols[px * 4 + 2];
-                if (wx * wx + wz * wz > edge || fog != null && fog[rn * _side + cn] != 0) { job.Pixels[p] = new Color32(); continue; }
+                if (wx * wx + wz * wz > edge || fog != null && !ExplorerArea.Explored(fog[rn * _side + cn], job.Shared)) { job.Pixels[p] = new Color32(); continue; }
                 int k = px * 12;
                 float h = 0f, hu = 0f, hr = 0f;
                 for (int r = 0; r < 4; r++)

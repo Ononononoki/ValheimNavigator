@@ -500,7 +500,7 @@ namespace ValheimNavigator
             }
             if (found == null)
             {
-                _card.text = kind.Kind + "\nNothing left to find." + (Settings.IncludeUnexplored.Value ? "\nReset starts again." : "\nUnexplored places are off in Settings.");
+                _card.text = kind.Kind + "\nNothing left to find." + (Settings.FindsUnexplored ? "\nReset starts again." : "\nUnexplored places are off in Settings.");
                 return;
             }
             var e = found.Entry;

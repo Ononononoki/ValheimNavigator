@@ -75,40 +75,81 @@ namespace ValheimNavigator
             UpdateStatus();
         }
 
+        // categories and kind rows still to be made. a few are made a frame, so the page shows at once and fills in (test 15: 57 ms in one frame)
+        private const double SliceMilliseconds = 5.0;
+        private readonly Queue<CategoryRow> _pending = new Queue<CategoryRow>();
+        private CategoryRow _making;
+        private int _nextKind, _slices;
+        private double _buildMilliseconds, _worstSlice;
+
         // the rows are made again when a new index is ready
         private void Rebuild()
         {
             foreach (Transform child in _scroll.Content) UnityEngine.Object.Destroy(child.gameObject);
-            _categories.Clear();
+            _categories.Clear(); _pending.Clear(); _making = null;
+            _slices = 0; _buildMilliseconds = _worstSlice = 0.0;
             if (!Session.Ready) return;
             foreach (var category in Categories.Order)
             {
                 var kinds = Session.Kinds.Values.Where(k => k.Category == category).OrderBy(k => k.Kind, StringComparer.Ordinal).ToList();
                 if (kinds.Count == 0) continue;
-                var row = new CategoryRow { Category = category, Kinds = kinds, Open = _allOpen };
-                var content = _scroll.Content;
-                TMP_Text expandText;
-                row.Expand = Ui.Tag(content, "Expand" + category, row.Open ? "v" : ">", 0f, 0f, ExpandWidth, CategoryHeight, 15f, TextAlignmentOptions.Midline, () => Toggle(row), out expandText);
-                row.ExpandText = expandText;
-                TMP_Text name;
-                row.Toggle = Ui.Tag(content, "Category" + category, "", ExpandWidth + 2f, 0f, _scroll.Width - ExpandWidth - 2f, CategoryHeight, 15f, TextAlignmentOptions.MidlineLeft, () => SwitchCategory(row), out name);
-                row.Name = name;
-                name.color = Ui.CategoryColor(category);
-                row.State = Ui.Label(row.Toggle.transform, "State", _scroll.Width - ExpandWidth - 2f - 96f, 0f, 88f, CategoryHeight, 14f, TextAlignmentOptions.MidlineRight, Ui.Ink);
-                foreach (var kind in kinds)
-                {
-                    var kindRow = new KindRow { Kind = kind };
-                    TMP_Text kindName;
-                    var captured = kindRow;
-                    kindRow.Button = Ui.Tag(content, "Kind" + kind.Key, "", KindIndent, 0f, _scroll.Width - KindIndent, KindHeight, 14f, TextAlignmentOptions.MidlineLeft, () => SwitchKind(captured), out kindName);
-                    kindRow.Name = kindName;
-                    kindRow.State = Ui.Label(kindRow.Button.transform, "State", _scroll.Width - KindIndent - 80f, 0f, 72f, KindHeight, 13f, TextAlignmentOptions.MidlineRight, Ui.Ink);
-                    row.Rows.Add(kindRow);
-                }
-                _categories.Add(row);
+                _pending.Enqueue(new CategoryRow { Category = category, Kinds = kinds, Open = _allOpen });
             }
+            BuildSlice();
+        }
+
+        internal override void Frame()
+        {
+            if (_making != null || _pending.Count > 0) BuildSlice();
+        }
+
+        // makes rows for about SliceMilliseconds, then places them
+        private void BuildSlice()
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (clock.Elapsed.TotalMilliseconds < SliceMilliseconds)
+            {
+                if (_making == null)
+                {
+                    if (_pending.Count == 0) break;
+                    _making = _pending.Dequeue(); _nextKind = 0;
+                    MakeCategory(_making);
+                    _categories.Add(_making);
+                }
+                else if (_nextKind < _making.Kinds.Count) MakeKind(_making, _making.Kinds[_nextKind++]);
+                else _making = null;
+            }
+            if (_making != null && _nextKind >= _making.Kinds.Count) _making = null;
             Layout();
             RefreshRows();
+            double ms = clock.Elapsed.TotalMilliseconds;
+            _slices++; _buildMilliseconds += ms; _worstSlice = Math.Max(_worstSlice, ms);
+            if (_making == null && _pending.Count == 0 && Plugin.LogCounters.Value)
+                Plugin.Log.LogInfo("page built, Layers rows, " + _categories.Count + " categories, " + _buildMilliseconds.ToString("F1") + " ms over " + _slices + " frames, worst slice " + _worstSlice.ToString("F1") + " ms");
+        }
+
+        private void MakeCategory(CategoryRow row)
+        {
+            var content = _scroll.Content;
+            TMP_Text expandText;
+            row.Expand = Ui.Tag(content, "Expand" + row.Category, row.Open ? "v" : ">", 0f, 0f, ExpandWidth, CategoryHeight, 15f, TextAlignmentOptions.Midline, () => Toggle(row), out expandText);
+            row.ExpandText = expandText;
+            TMP_Text name;
+            row.Toggle = Ui.Tag(content, "Category" + row.Category, "", ExpandWidth + 2f, 0f, _scroll.Width - ExpandWidth - 2f, CategoryHeight, 15f, TextAlignmentOptions.MidlineLeft, () => SwitchCategory(row), out name);
+            row.Name = name;
+            name.color = Ui.CategoryColor(row.Category);
+            row.State = Ui.Label(row.Toggle.transform, "State", _scroll.Width - ExpandWidth - 2f - 96f, 0f, 88f, CategoryHeight, 14f, TextAlignmentOptions.MidlineRight, Ui.Ink);
+        }
+
+        private void MakeKind(CategoryRow row, KindData kind)
+        {
+            var kindRow = new KindRow { Kind = kind };
+            TMP_Text kindName;
+            var captured = kindRow;
+            kindRow.Button = Ui.Tag(_scroll.Content, "Kind" + kind.Key, "", KindIndent, 0f, _scroll.Width - KindIndent, KindHeight, 14f, TextAlignmentOptions.MidlineLeft, () => SwitchKind(captured), out kindName);
+            kindRow.Name = kindName;
+            kindRow.State = Ui.Label(kindRow.Button.transform, "State", _scroll.Width - KindIndent - 80f, 0f, 72f, KindHeight, 13f, TextAlignmentOptions.MidlineRight, Ui.Ink);
+            row.Rows.Add(kindRow);
         }
 
         // puts the rows in their places, the kinds of a closed category are hidden

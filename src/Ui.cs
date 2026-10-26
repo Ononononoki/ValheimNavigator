@@ -153,6 +153,8 @@ namespace ValheimNavigator
         internal static TMP_Text Label(Transform parent, string name, float x, float y, float w, float h, float size, TextAlignmentOptions align, Color color)
         {
             var go = new GameObject(name, typeof(RectTransform));
+            // made inactive so the text wakes up with the game's font already set, not looking for TextMesh Pro's default one
+            go.SetActive(false);
             Place(go, parent, x, y, w, h);
             var text = go.AddComponent<TextMeshProUGUI>();
             if (Font != null) text.font = Font;
@@ -164,6 +166,7 @@ namespace ValheimNavigator
             text.textWrappingMode = TextWrappingModes.NoWrap;
             text.overflowMode = TextOverflowModes.Ellipsis;
             text.raycastTarget = false;
+            go.SetActive(true);
             return text;
         }
 
@@ -255,6 +258,13 @@ namespace ValheimNavigator
             button.colors = colors;
         }
 
+        private static GameObject Inactive(string name)
+        {
+            var go = new GameObject(name, typeof(RectTransform));
+            go.SetActive(false);
+            return go;
+        }
+
         // a one-line text box
         internal static TMP_InputField Input(Transform parent, string name, string hint, float x, float y, float w, float h, UnityAction<string> changed, UnityAction<string> submitted)
         {
@@ -266,10 +276,10 @@ namespace ValheimNavigator
             area.transform.SetParent(go.transform, false);
             Stretch((RectTransform)area.transform, 6f);
 
-            var text = new GameObject("Text", typeof(RectTransform)).AddComponent<TextMeshProUGUI>();
+            var text = Inactive("Text").AddComponent<TextMeshProUGUI>();
             text.transform.SetParent(area.transform, false);
             Stretch((RectTransform)text.transform, 0f);
-            var placeholder = new GameObject("Hint", typeof(RectTransform)).AddComponent<TextMeshProUGUI>();
+            var placeholder = Inactive("Hint").AddComponent<TextMeshProUGUI>();
             placeholder.transform.SetParent(area.transform, false);
             Stretch((RectTransform)placeholder.transform, 0f);
             foreach (var t in new[] { text, placeholder })
@@ -278,6 +288,7 @@ namespace ValheimNavigator
                 t.fontSize = 16f;
                 t.alignment = TextAlignmentOptions.MidlineLeft;
                 t.textWrappingMode = TextWrappingModes.NoWrap;
+                t.gameObject.SetActive(true);
             }
             text.color = Ink;
             placeholder.color = Dim;

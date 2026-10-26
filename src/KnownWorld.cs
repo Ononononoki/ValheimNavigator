@@ -70,6 +70,33 @@ namespace ValheimNavigator
 
         internal static bool Visible(KnownMark mark)
         {
+            return Shown(mark) && ExplorerArea.Visible(mark.X, mark.Z);
+        }
+
+        // a mark drawn on the maps. with ShipPins loaded its pins show every ship and cart, Navigator draws none of its own (the user,
+        // 25 Oct). Find and routes still use them
+        internal static bool Drawn(KnownMark mark)
+        {
+            return Visible(mark) && !(mark.Kind == 4 && ShipPinsLoaded);
+        }
+
+        private static int _shipPins = -1;
+        internal static bool ShipPinsLoaded
+        {
+            get
+            {
+                if (_shipPins < 0)
+                {
+                    _shipPins = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("onononoki.ShipPins") ? 1 : 0;
+                    if (_shipPins == 1) Plugin.Log.LogInfo("ShipPins found, ship and cart markers left to it, routes still use known ships");
+                }
+                return _shipPins == 1;
+            }
+        }
+
+        // the switch of the mark's family
+        private static bool Shown(KnownMark mark)
+        {
             switch (mark.Kind)
             {
                 case 0: return Settings.Ore.Value && (mark.Subtype == null || !Settings.OreTypes.TryGetValue(mark.Subtype, out var entry) || entry.Value);
@@ -284,7 +311,7 @@ namespace ValheimNavigator
             }
             if (kind.Ship) PendingShips.Add(new KnownMark { Id = zdo.m_uid.ToString(), X = position.x, Z = position.z, Name = kind.Prefab, Kind = 4 });
             if (Settings.SpawnSafe.Value && kind.Safe)
-                Pending.Add(new KnownMark { X = position.x, Z = position.z, Radius = kind.SafeRadius, Name = kind.Prefab, Kind = 1 });
+                Pending.Add(new KnownMark { Id = zdo.m_uid.ToString(), X = position.x, Z = position.z, Radius = kind.SafeRadius, Name = kind.Prefab, Kind = 1 });
             if (Settings.Ore.Value && kind.Ore)
             {
                 string n = kind.Name;
@@ -442,12 +469,22 @@ namespace ValheimNavigator
             catch { return "Contents unavailable"; }
         }
 
-        internal static bool Blocked(float x, float z)
+        internal static bool Blocked(float x, float z) { return BlockedIn(Obstacles, x, z); }
+
+        // a copy of the known sea rocks and ice for a route searched on a background thread, the map scan refills the live one meanwhile
+        internal static Dictionary<long, List<KnownMark>> ObstacleCopy()
+        {
+            var copy = new Dictionary<long, List<KnownMark>>(Obstacles.Count);
+            foreach (var pair in Obstacles) copy.Add(pair.Key, new List<KnownMark>(pair.Value));
+            return copy;
+        }
+
+        internal static bool BlockedIn(Dictionary<long, List<KnownMark>> obstacles, float x, float z)
         {
             int cx = (int)Math.Floor(x / 256f), cz = (int)Math.Floor(z / 256f);
             for (int dz = -1; dz <= 1; dz++) for (int dx = -1; dx <= 1; dx++)
             {
-                if (!Obstacles.TryGetValue(Key(cx + dx, cz + dz), out var marks)) continue;
+                if (!obstacles.TryGetValue(Key(cx + dx, cz + dz), out var marks)) continue;
                 foreach (var mark in marks)
                 {
                     float xx = mark.X - x, zz = mark.Z - z;

@@ -31,7 +31,7 @@ namespace ValheimNavigator
         private RawImage _map;
         private RawImage _dots;
         private RawImage _terrain;
-        private RawImage _fog;
+        private RawImage _fog, _shared;
         private int _overlayVersion = -1;
         private int _routeVersion = -1;
         private int _knownVersion = -1;
@@ -95,7 +95,8 @@ namespace ValheimNavigator
             _buffer = new Color32[Side * Side];
             _terrain = Layer("Terrain", 1); _terrain.raycastTarget = false;
             _fog = Layer("Shade", 2); _fog.raycastTarget = false;
-            _dots = Layer("Dots", 3);
+            _shared = Layer("SharedShade", 3); _shared.raycastTarget = false;
+            _dots = Layer("Dots", 4);
             _dots.texture = _dotTexture;
             _dots.raycastTarget = false;
         }
@@ -135,7 +136,7 @@ namespace ValheimNavigator
                     Color32 color = Ui.DotColor(kind.Category);
                     Color32 faded = new Color32(color.r, color.g, color.b, 70);
                     foreach (var e in kind.Items)
-                        if ((Settings.SpawnFilter.Value == 0 || e.Placed == (Settings.SpawnFilter.Value == 1)) && Pixel(map, e.X, e.Z, out int px, out int py)) { Blob(px, py, DotRadius, e.Done ? faded : color); dots++; }
+                        if ((Settings.SpawnFilter.Value == 0 || e.Placed == (Settings.SpawnFilter.Value == 1)) && ExplorerArea.Visible(e.X, e.Z) && Pixel(map, e.X, e.Z, out int px, out int py)) { Blob(px, py, DotRadius, e.Done ? faded : color); dots++; }
                 }
             var last = Session.Last;
             if (Settings.SearchPins.Value && MapAccess.Pins(map) != null)
@@ -144,7 +145,7 @@ namespace ValheimNavigator
             if (KnownWorld.Enabled)
                 foreach (var mark in KnownWorld.Marks)
                 {
-                    if (!KnownWorld.Visible(mark)) continue;
+                    if (!KnownWorld.Drawn(mark)) continue;
                     if (Pixel(map, mark.X, mark.Z, out int mx, out int my))
                         Blob(mx, my, 1, KnownWorld.Color(mark));
                 }
@@ -178,7 +179,7 @@ namespace ValheimNavigator
             if (last != null && Pixel(map, last.Entry.X, last.Entry.Z, out int lx, out int ly)) Blob(lx, ly, MarkRadius, new Color32(255, 200, 40, 255));
             var at = Session.PlayerPosition();
             if (at != null && Pixel(map, at.Value.x, at.Value.z, out int sx, out int sy)) Blob(sx, sy, MarkRadius, new Color32(255, 255, 255, 255));
-            _dotTexture.SetPixels32(_buffer);
+            _dotTexture.SetPixelData(_buffer, 0);
             _dotTexture.Apply(false);
             _note.text = (dots == 0 ? "Switch categories on in the Layers tab to see their places here. " : dots + " places shown. ")
                 + "White is you, gold is the picked result. Click the map to center the large map there.";
@@ -204,9 +205,15 @@ namespace ValheimNavigator
             _terrain.texture = TerrainOverlay.Texture;
             _terrain.gameObject.SetActive(TerrainOverlay.Active);
             _fog.texture = TerrainOverlay.Shade;
-            _fog.color = new Color(0.13f, 0.12f, 0.10f, Settings.FogTint.Value);
-            _fog.gameObject.SetActive(Settings.ShowUnexplored.Value);
+            _fog.color = TerrainOverlay.ShadeColor;
+            _fog.gameObject.SetActive(Settings.UnexploredShown);
+            _shared.texture = TerrainOverlay.SharedShade;
+            _shared.color = TerrainOverlay.SharedColor;
+            _shared.gameObject.SetActive(TerrainOverlay.SharedShown && (TerrainOverlay.Active || Settings.UnexploredShown) && TerrainOverlay.SharedShade != null);
             _material.SetTexture("_FogTex", Reveal.Fog(Minimap.instance));
+            // the copied material keeps the game's live shared fade, as the large map does
+            var live = MapAccess.LargeShader(Minimap.instance);
+            if (live != null && live.HasProperty("_SharedFade")) _material.SetFloat("_SharedFade", live.GetFloat("_SharedFade"));
             int version = Navigator.Visible != null ? Navigator.Visible.Version : -1;
             if (_overlayVersion != TerrainOverlay.Version || _routeVersion != version || _knownVersion != KnownWorld.Version || _portalVersion != Portals.Version || _route != Navigator.Visible)
             {

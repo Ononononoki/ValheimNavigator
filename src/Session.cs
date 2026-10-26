@@ -223,6 +223,24 @@ namespace ValheimNavigator
             return player != null ? (Vector3?)player.transform.position : null;
         }
 
+        // explored by you at a world point: the fog cache when it is filled (one byte a texel), else the game's own check
+        internal static bool ExploredAt(float x, float z)
+        {
+            var map = Minimap.instance;
+            if (map == null) return true;
+            var fog = DetailOverlay.FogData;
+            int side = DetailOverlay.DataSide;
+            if (DetailOverlay.FogReady && fog != null && side > 0 && fog.Length == side * side)
+            {
+                int sx = (int)(x / map.m_pixelSize + side / 2f), sz = (int)(z / map.m_pixelSize + side / 2f);
+                if (sx < 0 || sz < 0 || sx >= side || sz >= side) return false;
+                return fog[sz * side + sx] == 0;
+            }
+            if (_explored == null)
+                _explored = HarmonyLib.AccessTools.MethodDelegate<Func<Minimap, Vector3, bool>>(HarmonyLib.AccessTools.Method(typeof(Minimap), "IsExplored"));
+            return _explored(map, new Vector3(x, 0f, z));
+        }
+
         private static bool Explored(Entry entry)
         {
             var map = Minimap.instance;
@@ -238,7 +256,7 @@ namespace ValheimNavigator
             var at = PlayerPosition();
             if (at == null) { Last = null; return null; }
             Tracked.Add(kind.Key);
-            Func<Entry, bool> excluded = Settings.IncludeUnexplored.Value ? (Func<Entry, bool>)null : e => !Explored(e);
+            Func<Entry, bool> excluded = Settings.Explorer ? e => !ExplorerArea.Visible(e.X, e.Z) : Settings.FindsUnexplored ? (Func<Entry, bool>)null : e => !Explored(e);
             Last = Nearest.Find(kind.Items, at.Value.x, at.Value.z, excluded);
             return Last;
         }

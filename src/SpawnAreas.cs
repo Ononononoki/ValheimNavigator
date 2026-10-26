@@ -26,27 +26,36 @@ namespace ValheimNavigator
         internal static readonly List<Area> Live = new List<Area>();
         private static readonly Dictionary<string, float> Learned = new Dictionary<string, float>();
         private static readonly Dictionary<string, Dictionary<int, int>> Counts = new Dictionary<string, Dictionary<int, int>>();
+        // each object's own radius as last seen loaded, by its ZDO id
+        private static readonly Dictionary<string, float> ObjectRadius = new Dictionary<string, float>();
         private static bool _loaded, _changed, _warned;
         private static float _nextScan, _nextSave;
         internal static int Version;
 
         private static string FilePath => Path.Combine(Path.Combine(BepInEx.Paths.ConfigPath, "ValheimNavigator"), "spawn_protection_radius.txt");
+        private static string ObjectFilePath => Path.Combine(Path.Combine(BepInEx.Paths.ConfigPath, "ValheimNavigator"), "spawn_protection_objects.txt");
 
         private static void Load()
         {
             _loaded = true;
             try
             {
-                if (!File.Exists(FilePath)) return;
-                foreach (var line in File.ReadAllLines(FilePath))
-                {
-                    int at = line.LastIndexOf('=');
-                    if (at > 0 && float.TryParse(line.Substring(at + 1), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float radius))
-                        Learned[line.Substring(0, at)] = radius;
-                }
-                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("spawn protection radii read, " + Learned.Count + " prefabs");
+                Read(FilePath, Learned);
+                Read(ObjectFilePath, ObjectRadius);
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("spawn protection radii read, " + Learned.Count + " prefabs, " + ObjectRadius.Count + " objects");
             }
             catch (Exception ex) { Plugin.Log.LogWarning("could not read the spawn protection radii: " + ex.Message); }
+        }
+
+        private static void Read(string path, Dictionary<string, float> into)
+        {
+            if (!File.Exists(path)) return;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                int at = line.LastIndexOf('=');
+                if (at > 0 && float.TryParse(line.Substring(at + 1), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float radius))
+                    into[line.Substring(0, at)] = radius;
+            }
         }
 
         private static void Save()
@@ -55,12 +64,28 @@ namespace ValheimNavigator
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
-                var lines = new List<string>();
-                foreach (var pair in Learned) lines.Add(pair.Key + "=" + pair.Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
-                lines.Sort(StringComparer.Ordinal);
-                File.WriteAllLines(FilePath, lines.ToArray());
+                Write(FilePath, Learned);
+                Write(ObjectFilePath, ObjectRadius);
             }
             catch (Exception ex) { Plugin.Log.LogWarning("could not save the spawn protection radii: " + ex.Message); }
+        }
+
+        private static void Write(string path, Dictionary<string, float> from)
+        {
+            var lines = new List<string>();
+            foreach (var pair in from) lines.Add(pair.Key + "=" + pair.Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+            lines.Sort(StringComparer.Ordinal);
+            File.WriteAllLines(path, lines.ToArray());
+        }
+
+        // the radius of a remembered object: its own as last seen loaded, else the one its prefab usually has, else the prefab's.
+        // objects of one prefab can differ: Valheim Plus resizes in CraftingStation.Start only the first effect area of a station and only
+        // when it is a PlayerBase one, and on a server its config arrives after the first stations started (ValheimPlus IL, 24 Oct)
+        internal static float Radius(KnownMark mark, out bool learned)
+        {
+            if (!_loaded) Load();
+            if (mark.Id != null && ObjectRadius.TryGetValue(mark.Id, out float own)) { learned = true; return own; }
+            return Radius(mark.Name, mark.Radius, out learned);
         }
 
         // the radius for a remembered object of this prefab, the one seen loaded when there is one
@@ -106,6 +131,11 @@ namespace ValheimNavigator
                         var view = area.GetComponentInParent<ZNetView>();
                         var zdo = view != null ? view.GetZDO() : null;
                         var prefab = zdo != null && ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(zdo.GetPrefab()) : null;
+                        if (zdo != null)
+                        {
+                            string uid = zdo.m_uid.ToString();
+                            if (!ObjectRadius.TryGetValue(uid, out float seen) || Math.Abs(seen - radius) > 0.05f) { ObjectRadius[uid] = radius; _changed = true; }
+                        }
                         if (prefab != null)
                         {
                             if (!Counts.TryGetValue(prefab.name, out var counts)) { counts = new Dictionary<int, int>(); Counts[prefab.name] = counts; }
@@ -169,7 +199,7 @@ namespace ValheimNavigator
             foreach (var mark in KnownWorld.Marks)
             {
                 if (mark.Kind != 1) continue;
-                float radius = Radius(mark.Name, mark.Radius, out bool learned);
+                float radius = Radius(mark, out bool learned);
                 if (Inside(mark.X, mark.Z, radius, x, z)) best = Math.Max(best, learned ? 2 : 1);
             }
             return best;
@@ -290,7 +320,7 @@ namespace ValheimNavigator
             foreach (var mark in KnownWorld.Marks)
             {
                 if (mark.Kind != 1) continue;
-                float radius = SpawnAreas.Radius(mark.Name, mark.Radius, out bool learned);
+                float radius = SpawnAreas.Radius(mark, out bool learned);
                 Disc(span, uv, mark.X, mark.Z, radius, learned ? (byte)2 : (byte)1);
             }
             foreach (var area in SpawnAreas.Live) Disc(span, uv, area.X, area.Z, area.Radius, 3);
@@ -309,7 +339,7 @@ namespace ValheimNavigator
                 if (_texture != null) UnityEngine.Object.Destroy(_texture);
                 _texture = new Texture2D(_w, _h, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
             }
-            _texture.SetPixels32(_pixels);
+            _texture.SetPixelData(_pixels, 0);
             _texture.Apply(false);
             _image.texture = _texture;
             _shownUv = uv; _shownSize = size; _shownVersion = SpawnAreas.Version; _shownKnown = KnownWorld.Version;

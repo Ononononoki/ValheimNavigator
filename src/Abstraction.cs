@@ -49,6 +49,9 @@ namespace ValheimNavigator
             _world = WorldGenerator.instance; _maxSlope = maxSlope;
             _height = DetailOverlay.HeightData; _biome = DetailOverlay.BiomeData; _mask = DetailOverlay.MaskData; _side = DetailOverlay.DataSide;
             _pixel = map.m_pixelSize; _water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f;
+            // the cache folder and the world's fingerprint are read here, on the game's thread
+            try { _cacheFolder = TerrainOverlay.CacheFolder(); _worldKey = TerrainOverlay.World() + "_" + _pixel.ToString("R") + "_" + _water.ToString("R"); }
+            catch (Exception ex) { _cacheFolder = null; Plugin.Log.LogWarning("route tables are not kept on disk: " + ex.Message); }
             _state = 1; _landmarksBuilding = true;
             new Thread(Build) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal, Name = "ValheimNavigator route abstraction" }.Start();
         }
@@ -131,8 +134,10 @@ namespace ValheimNavigator
             try
             {
                 var clock = System.Diagnostics.Stopwatch.StartNew();
+                if (LoadRegions(clock)) { BuildLandmarks(); return; }
                 var type = new int[N * N];
-                for (int c = 0; c < N * N; c++) type[c] = TypeOf(c);
+                // each cell's type reads only the map arrays, so cells are shared out over a few threads
+                System.Threading.Tasks.Parallel.For(0, N * N, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = DetailOverlay.Threads }, c => type[c] = TypeOf(c));
                 var regionOf = new int[N * N];
                 for (int c = 0; c < regionOf.Length; c++) regionOf[c] = -1;
                 var regions = new List<Region>();
@@ -187,6 +192,7 @@ namespace ValheimNavigator
                 _state = 2;
                 Problem = null;
                 if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route abstraction ready, " + regions.Count + " regions, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms on a background thread");
+                SaveRegions();
                 BuildLandmarks();
             }
             catch (Exception ex)
@@ -251,11 +257,13 @@ namespace ValheimNavigator
                 _walkRate = 1f / Settings.WalkSpeed.Value; _wadeRate = WadePenalty / Settings.WalkSpeed.Value; _swimRate = Settings.SwimRisk.Value / Settings.SwimSpeed.Value;
                 float sailSpeed = FastestShip() / MinSailBias;
                 _sailRate = 1f / sailSpeed;
+                if (LoadLandmarks(key, world, clock)) return;
                 // lower-bound edge times, each edge once: directions 0, 1, 4 and 5, the other four are their reverses
                 int[] half = { 0, 1, 4, 5 };
                 var foot = new float[N * N * 4]; var sail = new float[N * N * 4];
                 var rate = new byte[N * N];
-                for (int c = 0; c < N * N; c++)
+                // each cell writes only its own edges, so cells are shared out over a few threads (3.2 s on one thread in test 15)
+                System.Threading.Tasks.Parallel.For(0, N * N, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = DetailOverlay.Threads }, c =>
                 {
                     float x0 = X(c), z0 = Z(c);
                     float h0 = Height(x0, z0, out _), d0 = _water - h0;
@@ -280,7 +288,7 @@ namespace ValheimNavigator
                         }
                         foot[c * 4 + k] = f; sail[c * 4 + k] = s;
                     }
-                }
+                });
                 var slow = new byte[N * N];
                 for (int c = 0; c < N * N; c++)
                 {
@@ -289,26 +297,186 @@ namespace ValheimNavigator
                     slow[c] = m;
                 }
                 Stage(clock, "edges ready");
-                var footMarks = Place(foot);
+                // the foot and sailing sets do not depend on each other and are placed side by side. inside a set each landmark waits for the
+                // ones before it (farthest-point placement)
+                ushort[][] footMarks = null, sailMarks = null;
+                System.Threading.Tasks.Parallel.Invoke(() => footMarks = Place(foot), () => sailMarks = Place(sail));
                 foot = null;
-                Stage(clock, "foot tables ready");
-                var sailMarks = Place(sail);
-                Stage(clock, "sailing tables ready");
+                Stage(clock, "foot and sailing tables ready");
                 // a world left while building keeps no tables of the old one
                 if (world != _world) { Stage(clock, "world changed, tables dropped"); return; }
                 _rateClass = slow; LandmarkSailSpeed = sailSpeed; _landmarkKey = key;
                 _footMarks = footMarks; _sailMarks = sailMarks;
-                _queue = _slot = null;
                 if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route landmarks ready, " + LandmarkCount + " on foot and " + LandmarkCount + " sailing, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms on a background thread");
+                SaveLandmarks(key);
             }
             catch (Exception ex)
             {
                 _footMarks = _sailMarks = null;
                 Plugin.Log.LogWarning("route landmarks failed, not tried again this session: " + ex);
-                _queue = _slot = null;
                 _landmarksFailed = true;
             }
             finally { _landmarksBuilding = false; }
+        }
+
+        // the regions and the landmark tables are kept per world in the game's temporary folder (about 6 MB and 13 MB), so a world seen
+        // before has them at once. the file holds its full key and is read only when the key, every length and every index fit, else the
+        // tables are built as before. the newest few files of each kind are kept
+        private static string _cacheFolder, _worldKey;
+        private const int KeptFiles = 4;
+        private const string RegionsFormat = "VNA1", LandmarksFormat = "VNL1";
+        private static bool _cacheWarned;
+        // regions and landmark sets read from disk this session, for the checks and the log
+        internal static int CacheReads;
+
+        private static string CacheFile(string kind, string key)
+        {
+            unchecked
+            {
+                uint h = 2166136261;
+                foreach (char ch in key) h = (h ^ ch) * 16777619;
+                return System.IO.Path.Combine(_cacheFolder, kind + "_" + h.ToString("x8") + ".bin");
+            }
+        }
+
+        private static string RegionsKey() { return RegionsFormat + "|" + _worldKey + "|" + _maxSlope.ToString("R") + "|" + N; }
+
+        private static void CacheWarning(string what, Exception ex)
+        {
+            if (_cacheWarned) return;
+            _cacheWarned = true;
+            Plugin.Log.LogWarning("route tables cache, " + what + ": " + ex.Message);
+        }
+
+        // written next to the final name first, so a game closed mid-write leaves no half file under it
+        private static void Write(string path, Action<System.IO.BinaryWriter> write)
+        {
+            string temp = path + ".tmp";
+            using (var stream = new System.IO.BinaryWriter(System.IO.File.Create(temp))) write(stream);
+            if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+            System.IO.File.Move(temp, path);
+            var files = new System.IO.DirectoryInfo(_cacheFolder).GetFiles(System.IO.Path.GetFileName(path).Split('_')[0] + "_*.bin");
+            if (files.Length <= KeptFiles) return;
+            Array.Sort(files, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+            for (int i = KeptFiles; i < files.Length; i++) files[i].Delete();
+        }
+
+        private static void SaveRegions()
+        {
+            if (_cacheFolder == null || _worldKey == null) return;
+            try
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                string key = RegionsKey();
+                Write(CacheFile("regions", key), w =>
+                {
+                    w.Write(key); w.Write(N); w.Write(_regions.Count);
+                    foreach (int r in _regionOf) w.Write(r);
+                    foreach (var region in _regions)
+                    {
+                        w.Write(region.Type); w.Write(region.Rep); w.Write(region.Count); w.Write(region.SumX); w.Write(region.SumZ); w.Write(region.Links.Count);
+                        foreach (var link in region.Links) { w.Write(link.Key); w.Write(link.Value); }
+                    }
+                });
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route abstraction kept on disk, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms");
+            }
+            catch (Exception ex) { CacheWarning("the regions were not written", ex); }
+        }
+
+        private static bool LoadRegions(System.Diagnostics.Stopwatch clock)
+        {
+            if (_cacheFolder == null || _worldKey == null) return false;
+            string key = RegionsKey(), path = CacheFile("regions", key);
+            if (!System.IO.File.Exists(path)) return false;
+            try
+            {
+                int[] regionOf; List<Region> regions;
+                using (var r = new System.IO.BinaryReader(System.IO.File.OpenRead(path)))
+                {
+                    if (r.ReadString() != key || r.ReadInt32() != N) return false;
+                    int count = r.ReadInt32();
+                    if (count < 0 || count > N * N) return false;
+                    regionOf = new int[N * N];
+                    for (int c = 0; c < regionOf.Length; c++) { int v = r.ReadInt32(); if (v < -1 || v >= count) return false; regionOf[c] = v; }
+                    regions = new List<Region>(count);
+                    for (int i = 0; i < count; i++)
+                    {
+                        var region = new Region { Type = r.ReadInt32(), Rep = r.ReadInt32(), Count = r.ReadInt32(), SumX = r.ReadDouble(), SumZ = r.ReadDouble() };
+                        if (region.Rep < 0 || region.Rep >= N * N) return false;
+                        int links = r.ReadInt32();
+                        for (int k = 0; k < links; k++) { int q = r.ReadInt32(); float length = r.ReadSingle(); if (q < 0 || q >= count) return false; region.Links[q] = length; }
+                        regions.Add(region);
+                    }
+                }
+                // the cells of each region in the order the build gives them
+                var cellsOf = new List<int>[regions.Count];
+                for (int i = 0; i < cellsOf.Length; i++) cellsOf[i] = new List<int>();
+                for (int c = 0; c < regionOf.Length; c++) if (regionOf[c] >= 0) cellsOf[regionOf[c]].Add(c);
+                _regionOf = regionOf; _regions = regions; _cellsOf = cellsOf;
+                _state = 2; Problem = null; CacheReads++;
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route abstraction read from the disk cache, " + regions.Count + " regions, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms");
+                return true;
+            }
+            catch (Exception ex) { CacheWarning("the regions file could not be read, they are built again", ex); return false; }
+        }
+
+        private static string LandmarksKey(string key) { return LandmarksFormat + "|" + _worldKey + "|" + key + "|" + N + "|" + LandmarkCount + "|" + MinSailBias.ToString("R") + "|" + WadePenalty.ToString("R"); }
+
+        private static void SaveLandmarks(string key)
+        {
+            if (_cacheFolder == null || _worldKey == null) return;
+            try
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                string full = LandmarksKey(key);
+                var foot = _footMarks; var sail = _sailMarks; var slow = _rateClass;
+                Write(CacheFile("landmarks", full), w =>
+                {
+                    w.Write(full); w.Write(N); w.Write(LandmarkSailSpeed); w.Write(foot.Length); w.Write(sail.Length);
+                    w.Write(slow);
+                    var bytes = new byte[N * N * 2];
+                    foreach (var mark in foot) { Buffer.BlockCopy(mark, 0, bytes, 0, bytes.Length); w.Write(bytes); }
+                    foreach (var mark in sail) { Buffer.BlockCopy(mark, 0, bytes, 0, bytes.Length); w.Write(bytes); }
+                });
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route landmarks kept on disk, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms");
+            }
+            catch (Exception ex) { CacheWarning("the landmarks were not written", ex); }
+        }
+
+        private static bool LoadLandmarks(string key, WorldGenerator world, System.Diagnostics.Stopwatch clock)
+        {
+            if (_cacheFolder == null || _worldKey == null) return false;
+            string full = LandmarksKey(key), path = CacheFile("landmarks", full);
+            if (!System.IO.File.Exists(path)) return false;
+            try
+            {
+                float sailSpeed; byte[] slow; ushort[][] foot, sail;
+                using (var r = new System.IO.BinaryReader(System.IO.File.OpenRead(path)))
+                {
+                    if (r.ReadString() != full || r.ReadInt32() != N) return false;
+                    sailSpeed = r.ReadSingle();
+                    int footCount = r.ReadInt32(), sailCount = r.ReadInt32();
+                    if (footCount < 1 || footCount > LandmarkCount || sailCount < 1 || sailCount > LandmarkCount) return false;
+                    slow = r.ReadBytes(N * N);
+                    if (slow.Length != N * N) return false;
+                    ushort[] Mark()
+                    {
+                        var bytes = r.ReadBytes(N * N * 2);
+                        if (bytes.Length != N * N * 2) throw new System.IO.EndOfStreamException("short landmark table");
+                        var mark = new ushort[N * N];
+                        Buffer.BlockCopy(bytes, 0, mark, 0, bytes.Length);
+                        return mark;
+                    }
+                    foot = new ushort[footCount][]; for (int i = 0; i < footCount; i++) foot[i] = Mark();
+                    sail = new ushort[sailCount][]; for (int i = 0; i < sailCount; i++) sail[i] = Mark();
+                }
+                if (world != _world) return false;
+                _rateClass = slow; LandmarkSailSpeed = sailSpeed; _landmarkKey = key;
+                _footMarks = foot; _sailMarks = sail; CacheReads++;
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route landmarks read from the disk cache, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms");
+                return true;
+            }
+            catch (Exception ex) { CacheWarning("the landmarks file could not be read, they are built again", ex); return false; }
         }
 
         // the edge time from cell c in direction d, reading the stored half of the directions
@@ -328,15 +496,11 @@ namespace ValheimNavigator
         }
 
         // the landmark search's queue: each cell at most once, moved up when its time drops (decrease-key), so its size is fixed. the lazy queue
-        // of 0.7.10 kept every improvement and ran out of memory in the game (test 8)
-        private static int[] _queue, _slot;
-
-        private static float[] Dijkstra(float[] edges, int source)
+        // of 0.7.10 kept every improvement and ran out of memory in the game (test 8). each set has its own queue, the two sets run side by side
+        private static float[] Dijkstra(float[] edges, int source, int[] queue, int[] slot)
         {
             var dist = new float[N * N];
             for (int i = 0; i < dist.Length; i++) dist[i] = float.PositiveInfinity;
-            if (_queue == null) { _queue = new int[N * N]; _slot = new int[N * N]; }
-            var queue = _queue; var slot = _slot;
             for (int i = 0; i < slot.Length; i++) slot[i] = -1;
             int size = 0;
             void Up(int i)
@@ -383,13 +547,14 @@ namespace ValheimNavigator
         private static ushort[][] Place(float[] edges)
         {
             var marks = new ushort[LandmarkCount][];
-            var nearest = Dijkstra(edges, CellAt(0f, 0f));
+            int[] queue = new int[N * N], slot = new int[N * N];
+            var nearest = Dijkstra(edges, CellAt(0f, 0f), queue, slot);
             for (int k = 0; k < LandmarkCount; k++)
             {
                 int far = -1; float best = 0f;
                 for (int c = 0; c < nearest.Length; c++) if (!float.IsInfinity(nearest[c]) && nearest[c] > best) { best = nearest[c]; far = c; }
                 if (far < 0) { Array.Resize(ref marks, k); break; }
-                var dist = Dijkstra(edges, far);
+                var dist = Dijkstra(edges, far, queue, slot);
                 var mark = new ushort[N * N];
                 for (int c = 0; c < N * N; c++)
                 {

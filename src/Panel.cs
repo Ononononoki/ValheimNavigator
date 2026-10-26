@@ -92,6 +92,8 @@ namespace ValheimNavigator
             if (_failed || !Plugin.Enabled.Value) return;
             try
             {
+                TerrainOverlay.MiniFrame(map);
+                DetailOverlay.MiniFrame(map);
                 MiniRoute.Frame(map);
                 if (Settings.SpawnSafe.Value) SpawnAreas.Scan();
                 bool large = map.m_mode == Minimap.MapMode.Large;
@@ -113,6 +115,7 @@ namespace ValheimNavigator
                 if (_toggle.activeSelf != button) { _toggle.SetActive(button); if (button) _toggle.transform.SetAsLastSibling(); }
                 if (show) Fit(map);
                 Ui.Typing = show && Find != null && Find.Typing;
+                if (large) ModeChoice.Frame(map);
                 if (large) Layers.Frame(map);
                 if (large) SpawnLayer.Frame(map);
                 if (large) TerrainOverlay.Frame(map);

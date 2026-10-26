@@ -74,6 +74,8 @@ namespace ValheimNavigator
         // the wind for comfortable routes: the direction it blows to, its strength 0 to 1, and the ship's measured speeds
         internal bool Wind;
         internal float WindX, WindZ = 1f, WindIntensity, ShipPaddle = 3.16f, ShipLow = 5f, ShipHigh = 9.5f;
+        // Moder's power turns the wind behind the ship on every heading (Ship.IsWindControllActive, StatusAttribute.SailingPower)
+        internal bool Moder;
         // the fastest travel still possible, the heuristic divides distance by it so it stays a lower bound on time
         internal float Fastest => Boats ? Math.Max(WalkSpeed, (Wind ? Math.Max(SailSpeed, ShipHigh) : SailSpeed) / SailBias) : WalkSpeed;
 
@@ -87,6 +89,7 @@ namespace ValheimNavigator
             float cos = Math.Max(-1f, Math.Min(1f, (dx * WindX + dz * WindZ) / length));
             float angle = (float)(Math.Acos(cos) * 180.0 / Math.PI);
             float full = ShipLow + (ShipHigh - ShipLow) * Math.Max(0f, Math.Min(1f, (WindIntensity - 0.05f) / 0.95f));
+            if (Moder) return full;
             float upwind = Math.Max(ShipPaddle, 0.46f * full);
             if (angle <= 100f) return full;
             if (angle <= 140f) return full + (0.65f * full - full) * (angle - 100f) / 40f;

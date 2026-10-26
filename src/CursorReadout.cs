@@ -42,7 +42,7 @@ namespace ValheimNavigator
             var height = MapAccess.Height(map);
             var fog = MapAccess.Fog(map);
             if (position.x * position.x + position.z * position.z > WorldGenerator.waterEdge * WorldGenerator.waterEdge) text += "    Outside the world";
-            else if (!Settings.ShowUnexplored.Value && fog != null && fog.GetPixelBilinear(u, v).r > 0.5f) text += "    Unexplored";
+            else if (!Settings.UnexploredShown && fog != null && fog.GetPixelBilinear(u, v).r > 0.5f) text += "    Unexplored";
             else if (height != null)
             {
                 float water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f;

@@ -56,10 +56,14 @@ namespace ValheimNavigator
             Add(Ui.Toggle(page, "MiniRoute", "Route on the minimap", 0f, 0f, w, Settings.MiniRoute, null));
             Add(Ui.Toggle(page, "CursorReadout", "Cursor height and depth", 0f, 0f, w, Settings.CursorTerrain, null));
             Section(page, "Terrain");
-            Add(Ui.Row(page, "View", "Map view", 0f, 0f, w, () => new[] { "Terrain", "Biomes", "Height", "Detailed" }[Settings.TerrainView.Value], () => Settings.TerrainView.Value != 0,
+            Add(Ui.Row(page, "MapMode", "Map mode", 0f, 0f, w, () => ModeChoice.Name(Settings.MapMode.Value), () => Settings.Explorer,
+                () => { Settings.MapMode.Value = Settings.MapMode.Value == 1 ? 2 : 1; ModeChoice.Applied(); }));
+            Add(Ui.Toggle(page, "MinimapTerrain", "Map view on the minimap", 0f, 0f, w, Settings.MinimapTerrain, null));
+            Add(Ui.Toggle(page, "FogClouds", "Game clouds in the shade", 0f, 0f, w, Settings.FogClouds, TerrainOverlay.Dirty));
+            Add(Ui.Row(page, "View", "Map view", 0f, 0f, w, () => new[] { "Terrain", "Biomes", "Height", "Simplified" }[Settings.TerrainView.Value], () => Settings.TerrainView.Value != 0,
                 () => { Settings.TerrainView.Value = (Settings.TerrainView.Value + 1) % 4; Panel.LayersChanged(); }));
             Add(Ui.Toggle(page, "ShowUnexplored", "Show unexplored terrain", 0f, 0f, w, Settings.ShowUnexplored, () => Reveal.Apply(Minimap.instance)));
-            Add(Ui.Cycle(page, "FogTint", "Unexplored shade", 0f, 0f, w, Settings.FogTint, new[] { 0.15f, 0.25f, 0.30f, 0.4f, 0.5f }, "", Panel.LayersChanged));
+            Add(Ui.Cycle(page, "FogTint", "Unexplored shade", 0f, 0f, w, Settings.FogTint, new[] { 0f, 0.15f, 0.25f, 0.30f, 0.4f, 0.5f, 0.6f }, "", Panel.LayersChanged));
             Add(Ui.Toggle(page, "Contours", "Contour lines", 0f, 0f, w, Settings.Contours, Panel.LayersChanged));
             Add(Ui.Cycle(page, "ContourMeters", "Contour interval", 0f, 0f, w, Settings.ContourMeters, new[] { 10f, 20f, 40f, 50f }, " m", Panel.LayersChanged));
             Add(Ui.Toggle(page, "ContourAuto", "Finer contours zoomed in", 0f, 0f, w, Settings.ContourAuto, Panel.LayersChanged));
@@ -221,7 +225,7 @@ namespace ValheimNavigator
                     + " ms, at most " + Session.WorstSliceMilliseconds.ToString("F1") + " ms in one frame.";
             else
                 _status.text = Session.Status;
-            if (Settings.ShowUnexplored.Value) _status.text += "\nUnexplored terrain is shown on the large map and in the overview.";
+            if (Settings.UnexploredShown) _status.text += "\nUnexplored terrain is shown on the large map and in the overview.";
             _status.text += "\nMist uses the natural mask and loaded clearing sources. Boat clearance uses base depth. Known objects cover generated areas only. Spawn protection is green where loaded, pale where remembered, sand where the radius has not been seen loaded yet.";
             if (KnownWorld.Problem != null) _status.text += "\nKnown-object scan failed. See the log.";
             if (ZoneSystem.instance != null)

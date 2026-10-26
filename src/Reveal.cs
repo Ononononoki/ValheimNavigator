@@ -38,7 +38,7 @@ namespace ValheimNavigator
         internal static Texture Fog(Minimap map)
         {
             var real = MapAccess.Fog(map);
-            if (!Settings.ShowUnexplored.Value || !TerrainOverlay.Ready(map)) return real;
+            if (!Settings.UnexploredShown || !TerrainOverlay.Ready(map)) return real;
             return All(map) ?? real;
         }
 
@@ -50,7 +50,7 @@ namespace ValheimNavigator
                 if (map == null) return;
                 var shader = MapAccess.LargeShader(map);
                 if (shader == null) return;
-                if (Settings.ShowUnexplored.Value)
+                if (Settings.UnexploredShown)
                 {
                     // the native fog stays until the unexplored shade is built, then the overlay swaps it
                     shader.SetTexture(FogName, Fog(map));
@@ -62,7 +62,7 @@ namespace ValheimNavigator
                     _applied = false;
                 }
                 TerrainOverlay.Dirty();
-                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("unexplored display " + (Settings.ShowUnexplored.Value ? "shaded" : "native fog"));
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("unexplored display " + (Settings.UnexploredShown ? "shaded" : "native fog"));
             }
             catch (Exception ex)
             {
