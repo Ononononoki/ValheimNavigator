@@ -43,6 +43,10 @@ namespace ValheimNavigator
         internal float PathSpeed = 1f, PathX, PathZ, PathRadius, PathX2, PathZ2, PathRadius2;
         // true when the straight step between two points passes a wall, trunk or rock a player cannot walk through (Detailed routes)
         internal Func<NavPoint, NavPoint, bool> Crosses;
+        // Detailed: a step on foot is checked again every FineSample meters where it is rough (near the slope limit, at a shore) or where
+        // Fine says the ground has small detail (terraforming, shaped location ground). 0 checks every step at Sample only
+        internal float FineSample;
+        internal Func<float, float, bool> Fine;
 
         // how much of the straight way from (x, z) to (xx, zz) lies over the path disks: that share of the time can shrink by the path speed.
         // the way must pass every distance along that line, and only the stretches the disks cover can go faster (RouteBench note, 23 Oct)
@@ -251,20 +255,47 @@ namespace ValheimNavigator
             var before = Read(x, z);
             if (Blocked(before)) return false;
             float step = distance / steps, steep = 0f, swum = 0f;
+            int parts = mode != 1 && Options.FineSample > 0f && step > Options.FineSample * 1.5f ? (int)Math.Ceiling(step / Options.FineSample) : 1;
             for (int i = 1; i <= steps; i++)
             {
                 float t = (float)i / steps;
                 var next = Read(x + (xx - x) * t, z + (zz - z) * t);
-                // only the steps beside the ship may sail shallow water. once this held for a whole edge when one end was near the ship, and a
-                // smoothed shortcut from the ship sailed straight across land (test 6, 22 Oct)
-                bool nearShip = mode == 1 && NearShip(before.X, before.Z) && NearShip(next.X, next.Z);
-                float s = StepSeconds(before, next, step, mode, nearShip, ref steep, ref swum);
-                if (float.IsInfinity(s)) return false;
-                seconds += s;
-                if (collect != null) { next.Mode = mode; collect.Add(next); }
+                if (parts > 1 && Rough(before, next, step))
+                {
+                    float t0 = (float)(i - 1) / steps;
+                    var from = before;
+                    for (int p = 1; p <= parts; p++)
+                    {
+                        float tp = t0 + (t - t0) * p / parts;
+                        var to = p == parts ? next : Read(x + (xx - x) * tp, z + (zz - z) * tp);
+                        if (!Walk(from, to, step / parts, mode, ref seconds, ref steep, ref swum, collect)) return false;
+                        from = to;
+                    }
+                }
+                else if (!Walk(before, next, step, mode, ref seconds, ref steep, ref swum, collect)) return false;
                 before = next;
             }
             return true;
+        }
+
+        private bool Walk(NavPoint before, NavPoint next, float step, byte mode, ref float seconds, ref float steep, ref float swum, List<NavPoint> collect)
+        {
+            // only the steps beside the ship may sail shallow water. once this held for a whole edge when one end was near the ship, and a
+            // smoothed shortcut from the ship sailed straight across land (test 6, 22 Oct)
+            bool nearShip = mode == 1 && NearShip(before.X, before.Z) && NearShip(next.X, next.Z);
+            float s = StepSeconds(before, next, step, mode, nearShip, ref steep, ref swum);
+            if (float.IsInfinity(s)) return false;
+            seconds += s;
+            if (collect != null) { next.Mode = mode; collect.Add(next); }
+            return true;
+        }
+
+        // a step checked again at FineSample: a shore, ground past half the slope limit, or ground with small detail (Fine)
+        private bool Rough(NavPoint before, NavPoint next, float step)
+        {
+            if (Water(before) != Water(next)) return true;
+            if (Math.Abs(SurfaceHeight(next) - SurfaceHeight(before)) > Options.MaxSlope * 0.5f * step) return true;
+            return Options.Fine != null && (Options.Fine(before.X, before.Z) || Options.Fine(next.X, next.Z));
         }
     }
 
@@ -664,6 +695,33 @@ namespace ValheimNavigator
             else StartForward();
         }
 
+        // a route from the route map (RouteQuery over RouteStore's zones): the query runs in the first step, on the route's worker thread
+        private readonly Func<RouteQuery.Result> _query;
+        // the route map found no way, the caller searches again with the grid
+        internal bool GraphFailed;
+        internal string GraphNote;
+        internal bool FromGraph => _query != null;
+
+        internal NavSearch(Func<RouteQuery.Result> query, Func<float, float, NavPoint> sample, NavOptions options)
+        {
+            _query = query; _options = options; _terrain = new NavTerrain(sample, options); _forward = true;
+        }
+
+        private void RunQuery()
+        {
+            var clock = Stopwatch.StartNew();
+            var result = _query();
+            if (result.Stopped) { Cancel(); return; }
+            Expanded = result.Expanded;
+            GraphNote = "route map " + result.Expanded + " nodes, " + result.Zones + " zones, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms";
+            if (!result.Reached || result.Points.Count < 2) { GraphFailed = true; Finished = true; return; }
+            Points.AddRange(result.Points);
+            Summarize();
+            // the query priced the route on the 2 m ground, boarding one's own ship, landings and portals included
+            Seconds = result.Seconds;
+            Reached = true; Finished = true; Version++;
+        }
+
         private static NavOptions Validate(NavOptions options)
         {
             if (options.Cell < 1f || options.Sample < 0.5f || options.MaxNodes < 1 || options.WalkSpeed <= 0f || options.SwimSpeed <= 0f || options.SailSpeed <= 0f
@@ -686,10 +744,14 @@ namespace ValheimNavigator
             return (float)Math.Sqrt(dx * dx + dz * dz);
         }
 
+        // lava as the game judges it (Heightmap.IsLava and ZoneSystem.IsLavaPreHeightmap, lavaValue 0.6). 0.1 also closed the glowing ground
+        // around it and cut the Ashlands into pockets no route reached (test of 10.2.3)
+        internal const float LavaValue = 0.6f;
+
         internal static NavSurface Classify(float height, float water, bool ashlands, float lava, float oceanHeat)
         {
             if (height < water) return oceanHeat >= 0f ? NavSurface.AshWater : NavSurface.Water;
-            return ashlands && lava > 0.1f ? NavSurface.Lava : NavSurface.Land;
+            return ashlands && lava > LavaValue ? NavSurface.Lava : NavSurface.Land;
         }
 
         private float X(Node node) { return _startX + node.X * _options.Cell; }
@@ -743,6 +805,7 @@ namespace ValheimNavigator
         internal void Step(float milliseconds)
         {
             if (Finished) return;
+            if (_query != null) { RunQuery(); return; }
             var clock = Stopwatch.StartNew();
             if (!_forward && _path == null)
             {

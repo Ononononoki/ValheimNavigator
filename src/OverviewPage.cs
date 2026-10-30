@@ -68,6 +68,11 @@ namespace ValheimNavigator
             {
                 if (_map == null) Create(map);
                 _material.SetTexture("_FogTex", Reveal.Fog(map));
+                // another mod (LivingMap) may swap the map's own textures and destroy the old ones, so the copy takes the live ones each time
+                var live = MapAccess.LargeShader(map);
+                if (live != null)
+                    foreach (string name in new[] { "_MainTex", "_MaskTex", "_HeightTex" })
+                        if (live.HasProperty(name) && _material.HasProperty(name)) _material.SetTexture(name, live.GetTexture(name));
                 _material.SetFloat("_zoom", Zoom);
                 _material.SetFloat("_pixelSize", PixelSizeBase / Zoom);
                 _material.SetVector("_mapCenter", Vector4.zero);

@@ -4,10 +4,12 @@
 !*/
 !.gitignore
 !/LICENSE
+!/THIRD_PARTY_NOTICES.md
 !/README.md
 !/ValheimNavigator.csproj
 !/src/*.cs
 !/package/manifest.json
 !/package/README.md
 !/package/CHANGELOG.md
+!/package/THIRD_PARTY_NOTICES.md
 !/package/icon.png

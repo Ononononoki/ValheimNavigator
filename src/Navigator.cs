@@ -110,7 +110,7 @@ namespace ValheimNavigator
 
         internal static void SetTarget(Vector3 point, string name)
         {
-            Clear(); Destination = point; Name = name; _skipCorridor = false;
+            Clear(); Destination = point; Name = name; _skipCorridor = false; _skipGraph = false; _graphPending = false;
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route target " + name + ", " + point.x.ToString("F0") + ", " + point.z.ToString("F0"));
         }
 
@@ -181,14 +181,23 @@ namespace ValheimNavigator
                 // a ship you are on, or your nearest known ship within ShipMeters, can be boarded. Build mode may also build a boat at the best
                 // shore, so a raft lying close by is used and a far one is not walked to. the boat of this trip that you left stays boardable,
                 // and no other is built unless MoreBoats. BoatSource 2 without a ship in reach builds one and says so
+                // to the Ashlands the boat is a drakkar: a heat-proof ship of yours lying somewhere is used, otherwise one is built. a ship that
+                // cannot sail the boiling sea is never planned there
+                string build = Settings.BuildShip.Value;
+                bool ashlands = rank == 7 || WorldGenerator.GetAshlandsOceanGradient(target.x, target.z) >= 0f;
+                if (ashlands && aboard == null && !atSea && !HeatProofShip(found ? prefab : build))
+                {
+                    found = PickShip(player.Value, null, out ship, out prefab, true);
+                    build = DrakkarPrefab;
+                }
                 if (found) { options.HasShip = true; options.ShipX = ship.x; options.ShipZ = ship.z; }
-                else if (atSea) { options.HasShip = true; options.ShipX = player.Value.x; options.ShipZ = player.Value.z; prefab = Settings.BuildShip.Value; }
+                else if (atSea) { options.HasShip = true; options.ShipX = player.Value.x; options.ShipZ = player.Value.z; prefab = build; }
                 options.BuildBoat = aboard == null && !atSea && (Settings.BoatSource.Value == 1 || !found) && (!BoatUsed || Settings.MoreBoats.Value);
                 NoShipNear = Settings.BoatSource.Value == 2 && !found && !atSea;
-                if (!found && !atSea) prefab = Settings.BuildShip.Value;
+                if (!found && !atSea) prefab = build;
                 options.MoreBoats = Settings.MoreBoats.Value;
                 options.BuildSeconds = Settings.BuildSeconds.Value; options.ExtraBoatSeconds = Settings.ExtraBoatSeconds.Value;
-                options.HeatProof = prefab.IndexOf("Ashlands", StringComparison.OrdinalIgnoreCase) >= 0;
+                options.HeatProof = HeatProofShip(prefab);
                 ShipKnown = ShipSpeeds.Of(prefab, out options.ShipPaddle, out options.ShipLow, out options.ShipHigh);
                 // without wind a known ship sails at about half wind, the middle of its measured range
                 options.SailSpeed = options.ShipLow + (options.ShipHigh - options.ShipLow) * 0.47f;
@@ -221,6 +230,20 @@ namespace ValheimNavigator
                 if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route destination moved " + NavSearch.Distance(tx, tz, target.x, target.z).ToString("F0") + " m to walkable ground");
                 target.x = tx; target.z = tz;
             }
+            // the route map (HPA* over the 2 m ground, RouteStore) finds the route once its zones around you and the destination are built. the
+            // grid search below is only the fallback while they are not, or when the route map finds no way
+            if (!_skipGraph && GraphRoute(player.Value, target, options)) return;
+            // the Ashlands wait for the route map: the grid search checks the ground only every few meters and can lead through lava. the
+            // route map builds the tiles around this route first, Follow searches again once they are there
+            if (!_skipGraph && Ashlands(target))
+            {
+                StopWorker();
+                Search = null; _display = null; _running = true; _graphPending = true;
+                Problem = _graphMissing < 0 ? "The route map is starting. Routes to the Ashlands wait for it, the quick search can lead through lava."
+                    : "The route map is being built around this route (" + _graphMissing + " tiles left, nearest first). Routes to the Ashlands wait for it, the quick search can lead through lava.";
+                Layers.Dirty();
+                return;
+            }
             // the weight: exact inside a long route's corridor, 1.2 with the landmark tables, SearchWeight before they are built. the sailing
             // tables bound only ships no faster than the one they were built for
             bool corridorRoute = !_skipCorridor && Abstraction.Ready && NavSearch.Distance(player.Value.x, player.Value.z, target.x, target.z) >= CorridorMeters;
@@ -235,6 +258,8 @@ namespace ValheimNavigator
             float water = options.WaterLevel;
             var generator = _world;
             bool loadedTerrain = Settings.LoadedTerrain.Value && ZoneSystem.instance != null;
+            // Detailed walks the 2 m ground of the whole world (the detailed map's ground), and checks it every 2 m where it is rough or detailed
+            if (loadedTerrain) { options.FineSample = RouteGround.SampleMeters; options.Fine = RouteGround.Detail; }
             bool explorer = Settings.Explorer;
             float explorerEdge = Settings.ExplorerEdgeMeters.Value;
             // Fast routes read only the generated world (the game itself runs it on its heightmap thread), a copy of the sea rocks and the
@@ -280,6 +305,7 @@ namespace ValheimNavigator
                 Color mask;
                 var biome = generator.GetBiome(x, z);
                 float height = generator.GetBiomeHeight(biome, x, z, out mask, false, true);
+                if (loadedTerrain) height = RouteGround.Height(generator, x, z);
                 bool ashlands = biome == Heightmap.Biome.AshLands;
                 bool blocked = false, onTop = false;
                 float speed = 0f;
@@ -322,7 +348,7 @@ namespace ValheimNavigator
             Layers.Dirty();
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route started, " + (Comfortable ? "comfortable" : "shortest") + ", grid " + options.Cell + " m, weight " + options.Weight.ToString("0.0")
                 + ", ship " + (ShipName == null ? "none" : ShipName + (aboard != null ? " aboard" : options.BuildBoat ? " built at a shore" : " at " + options.ShipX.ToString("F0") + ", " + options.ShipZ.ToString("F0")))
-                + (options.MoreBoats ? ", more boats" : "") + (_threaded ? ", background thread" : ", game thread") + ", landmarks " + (options.Landmarks != null ? "on" : Abstraction.LandmarkState) + ", danger above rank " + options.DangerRank + ", portals " + options.Portals.Count + ", wind " + (options.Wind ? options.WindIntensity.ToString("0.00") : "off") + ", corridor " + corridor + ", detail " + (loadedTerrain ? "detailed" : "fast") + (paths ? ", SpeedyPaths up to " + options.PathSpeed.ToString("0.00") : ""));
+                + (options.MoreBoats ? ", more boats" : "") + (_threaded ? ", background thread" : ", game thread") + ", landmarks " + (options.Landmarks != null ? "on" : Abstraction.LandmarkState) + ", danger above rank " + options.DangerRank + ", portals " + options.Portals.Count + ", wind " + (options.Wind ? options.WindIntensity.ToString("0.00") : "off") + ", corridor " + corridor + ", detail " + (loadedTerrain ? "detailed on the 2 m ground, checked every " + options.Sample.ToString("0.#") + " m, " + options.FineSample.ToString("0.#") + " m where rough or detailed" : "fast") + (paths ? ", SpeedyPaths up to " + options.PathSpeed.ToString("0.00") : ""));
         }
 
         // the real ground of a loaded zone, terraforming included, and the static solids on it (rocks, trunks, buildings). the solid top
@@ -666,6 +692,80 @@ namespace ValheimNavigator
         // routes at least this long use the abstraction's corridor. a corridor that failed is skipped until the destination changes
         private const float CorridorMeters = 1500f;
         private static bool _skipCorridor;
+
+        // the route map found no way to this destination, the grid search decides until another destination is picked
+        private static bool _skipGraph;
+        internal static int GraphRoutes, GraphFallbacks;
+        // the route came from the grid search because the route map was not built around it yet, it is searched again once it is
+        private static bool _graphPending;
+        private static int _graphMissing = -1;
+
+        // the destination lies in the Ashlands or on its boiling sea
+        private static bool Ashlands(Vector3 target) =>
+            Rank(WorldGenerator.instance.GetBiome(target.x, target.z)) == 7 || WorldGenerator.GetAshlandsOceanGradient(target.x, target.z) >= 0f;
+        private static RouteQuery _query;
+        private static ZoneGraph.Rules _queryRules;
+
+        // the route on the route map, on the route's worker thread. false when the route map is not running or not built around the route
+        private static bool GraphRoute(Vector3 player, Vector3 target, NavOptions options)
+        {
+            var rules = RouteStore.Rules;
+            if (!RouteStore.Running || rules == null) return false;
+            float px = player.x, pz = player.z, gx = target.x, gz = target.z;
+            RouteStore.Want(px, pz, gx, gz);
+            _graphPending = false;
+            if (!RouteStore.Ready(px, pz, gx, gz, out int missing))
+            {
+                GraphFallbacks++; _graphPending = true; _graphMissing = missing;
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map not built around this route yet (" + (missing < 0 ? "reading" : missing + " tiles to build") + "), the grid search is used");
+                return false;
+            }
+            var q = new RouteQuery.Request
+            {
+                StartX = px, StartZ = pz, GoalX = gx, GoalZ = gz, Comfort = options.Comfortable,
+                PortalSeconds = options.PortalSeconds, SwitchSeconds = options.SwitchSeconds, BuildSeconds = options.BuildSeconds, OpenMeters = KeepOpen,
+                BuildBoat = options.BuildBoat, MoreBoats = options.BuildBoat && options.MoreBoats, HasShip = options.HasShip, ShipX = options.ShipX, ShipZ = options.ShipZ, HeatProof = options.HeatProof,
+                Stop = () => _stopWorker
+            };
+            q.Portals.AddRange(options.Portals);
+            if (options.Boats)
+            {
+                // the ship's speed with this route's wind and bias, the zones were built with SailSpeed
+                q.Sail = (dx, dz) => options.SailSpeedAlong(dx, dz) / options.SailBias;
+                q.FastestSail = (options.Wind ? Math.Max(options.SailSpeed, options.ShipHigh) : options.SailSpeed) / options.SailBias;
+            }
+            // Explorer: the walk stays in zones near explored land, the sea is sailed anywhere
+            if (Settings.Explorer)
+            {
+                var near = ExplorerArea.NearTest(Settings.ExplorerEdgeMeters.Value + ZoneGraph.Meters * 0.71f);
+                if (near == null) return false;
+                q.Allowed = (zx, zz) => near(zx * ZoneGraph.Meters, zz * ZoneGraph.Meters);
+            }
+            // harder biomes only in Comfort (Shortest is always the fastest walkable way): a zone reaching a biome ranked above the limit is
+            // walked slower by DangerPenalty, or kept out. the zones you stand in and go to are walked as they are
+            if (options.Comfortable && Settings.Danger.Value != 0)
+            {
+                int limit = options.DangerRank, szx = RouteQuery.ZoneOf(px), szz = RouteQuery.ZoneOf(pz), gzx = RouteQuery.ZoneOf(gx), gzz = RouteQuery.ZoneOf(gz);
+                float penalty = options.DangerBlock ? float.PositiveInfinity : Math.Max(1f, options.DangerPenalty);
+                q.FootFactor = (zx, zz) =>
+                {
+                    if (zx == szx && zz == szz || zx == gzx && zz == gzz) return 1f;
+                    var zone = RouteStore.Zone(zx, zz);
+                    return zone != null && zone.Rank > limit ? penalty : 1f;
+                };
+            }
+            // one query kept while the route map keeps its rules: its ground points and portal searches serve the next route too
+            if (_query == null || _queryRules != rules) { _query = new RouteQuery(RouteStore.Zone, RouteStore.Sample, rules); _queryRules = rules; }
+            var query = _query;
+            Search = new NavSearch(() => query.Find(q), (x, z) => RouteStore.Sample(Mathf.RoundToInt(x * 0.5f) * 2, Mathf.RoundToInt(z * 0.5f) * 2), options);
+            _threaded = true; _tree = null; _treeBuilt = Time.unscaledTime;
+            GraphRoutes++;
+            Layers.Dirty();
+            if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route started on the route map, " + (Comfortable ? "comfortable" : "shortest")
+                + ", ship " + (ShipName == null ? "none" : ShipName + (options.HasShip ? " at " + options.ShipX.ToString("F0") + ", " + options.ShipZ.ToString("F0") : "") + (q.BuildBoat ? ", built at a shore" : "") + (q.MoreBoats ? ", more boats" : ""))
+                + (q.HeatProof ? ", heat-proof" : "") + ", portals " + q.Portals.Count + ", wind " + (options.Wind ? options.WindIntensity.ToString("0.00") : "off") + (q.FootFactor != null ? ", danger above rank " + options.DangerRank : "") + (q.Allowed != null ? ", explorer" : ""));
+            return true;
+        }
         // the wind the kept tree was built with, checked every WindCheckSeconds while a comfortable route sails
         private static float _windX, _windZ, _windNext;
         private static bool _windUsed, _moderUsed;
@@ -745,7 +845,25 @@ namespace ValheimNavigator
 
         // the ship you are aboard, otherwise the nearest known or loaded ship within ShipMeters. without one there, the nearest known ship
         // on land or sea explored by you or a cartography table (the user, 25 Oct)
-        private static bool PickShip(Vector3 player, Ship aboard, out Vector3 position, out string prefab)
+        // a ship that sails the boiling Ashlands sea: the game's own mark on the ship (Ship.m_ashlandsReady, ships of other mods too) or a
+        // drakkar by its name
+        private const string DrakkarPrefab = "VikingShip_Ashlands";
+        private static readonly HarmonyLib.AccessTools.FieldRef<Ship, bool> AshlandsReady = ReadyField();
+        private static HarmonyLib.AccessTools.FieldRef<Ship, bool> ReadyField()
+        {
+            try { return HarmonyLib.AccessTools.FieldRefAccess<Ship, bool>("m_ashlandsReady"); } catch (Exception) { return null; }
+        }
+
+        internal static bool HeatProofShip(string prefab)
+        {
+            if (string.IsNullOrEmpty(prefab)) return false;
+            if (prefab.IndexOf("Ashlands", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            var ship = ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(prefab)?.GetComponent<Ship>() : null;
+            return ship != null && AshlandsReady != null && AshlandsReady(ship);
+        }
+
+        // heatProof: only ships that sail the boiling sea
+        private static bool PickShip(Vector3 player, Ship aboard, out Vector3 position, out string prefab, bool heatProof = false)
         {
             position = Vector3.zero; prefab = null; FarShipMeters = 0f; FarShipUsed = false;
             if (aboard != null) { position = aboard.transform.position; prefab = Utils.GetPrefabName(aboard.gameObject); return true; }
@@ -755,7 +873,7 @@ namespace ValheimNavigator
             foreach (var item in Ship.Instances)
             {
                 var ship = item as Ship;
-                if (ship == null) continue;
+                if (ship == null || heatProof && !HeatProofShip(Utils.GetPrefabName(ship.gameObject))) continue;
                 float d = NavSearch.Distance(player.x, player.z, ship.transform.position.x, ship.transform.position.z);
                 nearest = Math.Min(nearest, d);
                 if (d < best) { best = d; position = ship.transform.position; prefab = Utils.GetPrefabName(ship.gameObject); }
@@ -763,6 +881,7 @@ namespace ValheimNavigator
             }
             foreach (var mark in KnownWorld.Ships)
             {
+                if (heatProof && !HeatProofShip(mark.Name)) continue;
                 float d = NavSearch.Distance(player.x, player.z, mark.X, mark.Z);
                 nearest = Math.Min(nearest, d);
                 if (d < best) { best = d; position = new Vector3(mark.X, 0f, mark.Z); prefab = mark.Name; }
@@ -840,6 +959,24 @@ namespace ValheimNavigator
                     if (_threaded) { StartWorker(Search); return; }
                     Search.Step(Settings.RouteBudget.Value);
                 }
+                // no way to the Ashlands on the route map: said so, the grid search is not trusted there (lava)
+                if (Search.Finished && Search.GraphFailed && Destination.HasValue && Ashlands(Destination.Value))
+                {
+                    bool heat = Search.Options.HeatProof;
+                    if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map found no way to the Ashlands" + (heat ? "" : " without a heat-proof ship") + " (" + Search.GraphNote + ")");
+                    Search = null; _running = false;
+                    Problem = heat ? "No way there was found. Lava, cliffs or the boiling sea cut it off. Try a nearer place or a portal there."
+                        : "No way there is known. The Ashlands need a heat-proof ship (a drakkar) or a portal there.";
+                    Layers.Dirty();
+                    return;
+                }
+                if (Search.Finished && Search.GraphFailed)
+                {
+                    _skipGraph = true; GraphFallbacks++;
+                    if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map found no way (" + Search.GraphNote + "), the grid search is used");
+                    Calculate(true);
+                    return;
+                }
                 if (Search.Finished && Search.CorridorFailed)
                 {
                     _skipCorridor = true;
@@ -856,7 +993,7 @@ namespace ValheimNavigator
                         Plugin.Log.LogInfo("route " + (Search.Reached ? "ready" : "partial") + ", " + Search.Length.ToString("F0") + " m, water " + Search.WaterLength.ToString("F0")
                             + " m, nodes " + Search.Expanded + ", samples " + Search.SampleCount + (fromWorker ? ", on a background thread" : ", worst slice " + Search.WorstSlice.ToString("F2") + " ms")
                             + ", " + Search.Seconds.ToString("F0") + " s, portal pairs " + Search.Options.Portals.Count + ", jumps " + Search.PortalJumps
-                            + ", portal bound " + Search.Tree.PortalBound(Search.Tree.GoalX, Search.Tree.GoalZ, Search.Options.Boats).ToString("F0") + " s"
+                            + (Search.FromGraph ? ", " + Search.GraphNote : ", portal bound " + Search.Tree.PortalBound(Search.Tree.GoalX, Search.Tree.GoalZ, Search.Options.Boats).ToString("F0") + " s")
                             + ", loaded samples " + LoadedSamples + " (" + SolidSamples + " under a solid, " + BlockedSamples + " blocked, " + PathSamples + " on a path, " + RememberedSamples + " remembered, " + WallSteps + " wall steps, " + (LoadedTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1") + " ms)");
                     _reported = true;
                 }
@@ -881,6 +1018,12 @@ namespace ValheimNavigator
             bool left = _wasAboard && Aboard() == null;
             if (left) BoatUsed = true;
             if (KnownWorld.HazardVersion != _hazards || left || Time.unscaledTime - _treeBuilt >= Settings.RouteRebuildSeconds.Value) { Calculate(true); return; }
+            if (_graphPending && !_skipGraph && Destination.HasValue && RouteStore.Ready(p.x, p.z, Destination.Value.x, Destination.Value.z, out _))
+            {
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map built around the route, the route is searched on it");
+                Calculate(true);
+                return;
+            }
             if (!_wasAboard && Aboard() != null) { _wasAboard = true; Calculate(false); return; }
             // a wind that turned far from the one the route was planned with starts a new route
             if (_windUsed && Time.unscaledTime >= _windNext && _display != null && _display.SailLength > 0f)
@@ -897,7 +1040,8 @@ namespace ValheimNavigator
                 if (!_moderUsed && wind.Intensity >= WindTurnMinStrength && wind.X * _windX + wind.Z * _windZ < Mathf.Cos(WindTurnDegrees * Mathf.Deg2Rad)) { Calculate(true); return; }
             }
             // a zone on the route that loaded after the route was searched may hold terraforming or objects the generated world lacks
-            if (Settings.LoadedTerrain.Value && _display != null && _display.Finished && Time.unscaledTime >= _zoneNext && ZoneLoadedOnRoute(_display))
+            // a route from the route map reads no loaded objects, a loading zone changes nothing for it
+            if (Settings.LoadedTerrain.Value && _display != null && _display.Finished && !_display.FromGraph && Time.unscaledTime >= _zoneNext && ZoneLoadedOnRoute(_display))
             {
                 _zoneNext = Time.unscaledTime + ZoneRerouteSeconds; ZoneReroutes++;
                 if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route searched again, a zone on it loaded (" + ZoneReroutes + " so far)");
@@ -1012,7 +1156,7 @@ namespace ValheimNavigator
             _status.textWrappingMode = TextWrappingModes.Normal;
             var legend = Ui.Label(parent, "Legend", 0f, 450f, Panel.PageWidth, 90f, 11f, TextAlignmentOptions.TopLeft, Ui.Dim);
             legend.textWrappingMode = TextWrappingModes.Normal;
-            legend.text = "Line color: green flat, brown steep, dark blue sailing, light blue swimming or wading, magenta boiling Ashlands water, violet rings mark the portals to take. Boat: Build at the best shore, or walk to your Nearest ship.\nKnown sea rocks are avoided. Unknown spires, trees and buildings can block a route. Travel time is an estimate.";
+            legend.text = "Line color: green flat, brown steep, dark blue sailing, light blue swimming or wading, magenta boiling Ashlands water, violet rings mark the portals to take. Boat: Build at the best shore, or walk to your Nearest ship.\nSpires, sea rocks, trees and buildings can block a route. Travel time is an estimate.";
         }
 
         internal override void Show() { _mode.Refresh(); _sail.Refresh(); _boat.Refresh(); _more.Refresh(); _detail.Refresh(); _ore.Refresh(); Frame(); }

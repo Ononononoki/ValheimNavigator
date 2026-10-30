@@ -184,11 +184,18 @@ namespace ValheimNavigator
             var zdo = view != null ? view.GetZDO() : null;
             var prefab = zdo != null && ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(zdo.GetPrefab()) : null;
             var fire = area.GetComponentInParent<Fireplace>();
-            string state = fire == null ? "no fire" : "fire " + (fire.IsBurning() ? "burning" : "out") + ", fuel " + (zdo != null ? zdo.GetFloat(ZDOVars.s_fuel, 0f).ToString("F1") : "?") + (fire.m_infiniteFuel ? ", infinite" : "");
+            string state = fire == null ? "no fire" : "fire " + FireState(fire) + ", fuel " + (zdo != null ? zdo.GetFloat(ZDOVars.s_fuel, 0f).ToString("F1") : "?") + (fire.m_infiniteFuel ? ", infinite" : "");
             var p = area.transform.position;
             var collider = area.GetComponent<Collider>();
             string radius = collider != null ? ", radius " + RadiusOf(collider).ToString("F1") + " m" : "";
             Plugin.Log.LogInfo("spawn protection area " + (prefab != null ? prefab.name : area.name) + " at " + p.x.ToString("F0") + ", " + p.z.ToString("F0") + (active ? " active" : " inactive") + radius + ", " + state);
+        }
+
+        // IsBurning reads the fire's ZDO, which a fire being set up or removed does not have
+        private static string FireState(Fireplace fire)
+        {
+            try { return fire.IsBurning() ? "burning" : "out"; }
+            catch (NullReferenceException) { return "not set up"; }
         }
 
         // what protects a point, 0 nothing, otherwise the best state of the areas that cover it

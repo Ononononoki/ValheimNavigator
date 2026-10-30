@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -12,7 +12,7 @@ namespace ValheimNavigator
     {
         public const string ModGuid = "onononoki.ValheimNavigator";
         public const string ModName = "ValheimNavigator";
-        public const string ModVersion = "0.1.2";
+        public const string ModVersion = "0.2.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -22,9 +22,12 @@ namespace ValheimNavigator
         private void Update()
         {
             WorldSync.Tick();
-            if (ZNet.instance != null && ZNet.instance.IsDedicated()) { if (Enabled.Value) KnownWorld.Tick(); return; }
+            MapShare.Tick();
+            if (ZNet.instance != null && ZNet.instance.IsDedicated()) { if (Enabled.Value) { KnownWorld.Tick(); Tombstones.Tick(); } return; }
             Session.Tick(UnityEngine.Time.deltaTime);
-            if (Enabled.Value) { ExplorerArea.Tick(); KnownWorld.Tick(); Navigator.Tick(); }
+            if (Enabled.Value) { ExplorerArea.Tick(); KnownWorld.Tick(); Navigator.Tick(); Tombstones.Tick(); }
+            FineTerrain.Tick();
+            RouteStore.Tick();
         }
 
         // the mod was called MapSearch before 0.7.7. its cfg and its data folder are copied once to the new names, the old files stay

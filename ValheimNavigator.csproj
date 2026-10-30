@@ -37,6 +37,13 @@
     <Reference Include="UnityEngine.UI"><HintPath>$(Managed)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.UIModule"><HintPath>$(Managed)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.TextMeshPro"><HintPath>$(Managed)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(Managed)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SoftReferenceableAssets"><HintPath>$(Managed)\SoftReferenceableAssets.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the detailed map shader (shaders\NavigatorFineMap.shader) built into an AssetBundle by Unity 6000.0.75f1 (test\FineMapTiming\run_bundle.ps1) -->
+    <!-- made from the game's own map shader, so it is not in the public repository. without it the build works and the detailed view is off -->
+    <EmbeddedResource Include="assets\navigator_finemap" LogicalName="ValheimNavigator.navigator_finemap" Condition="Exists('assets\navigator_finemap')" />
   </ItemGroup>
 
   <!-- copy the built dll into package/ so the zip step picks it up -->

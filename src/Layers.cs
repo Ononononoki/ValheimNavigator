@@ -85,6 +85,12 @@ namespace ValheimNavigator
         private static readonly List<TMP_Text> Labels = new List<TMP_Text>();
         private static readonly List<KeyValuePair<PortalInfo, PortalInfo>> Links = new List<KeyValuePair<PortalInfo, PortalInfo>>();
         private static readonly Comparison<SingleItem> ByDistance = (a, b) => a.Distance.CompareTo(b.Distance);
+
+        // places in view by category, then by their distance to you, for the pin limit
+        private struct RankItem { internal int Index, Category; internal float Distance; }
+        private static readonly List<RankItem> Ranked = new List<RankItem>();
+        private static readonly Comparison<RankItem> ByCategoryDistance = (a, b) => a.Category != b.Category ? a.Category.CompareTo(b.Category) : a.Distance.CompareTo(b.Distance);
+        private static bool[] _keep = new bool[0];
         private static readonly Dictionary<long, KnownGroup> KnownCells = new Dictionary<long, KnownGroup>();
         private static readonly List<KeyValuePair<float, KnownMark>> KnownSingles = new List<KeyValuePair<float, KnownMark>>();
         private static readonly int[] FamilyShown = new int[16];
@@ -311,11 +317,35 @@ namespace ValheimNavigator
             Array.Clear(_cellY, 0, cells);
             float invW = 1f / uv.width, invH = 1f / uv.height;
             bool covered = Panel.CoveredArea(_rect, out var cover);
+            // the pin limit holds for each category before grouping: only its nearest places to you (to the middle of the view without a
+            // player) are shown, as pins or inside the numbered circles, so a zoomed out map is not crowded by circles of hundreds
+            int limit = Settings.MaxPins.Value, limited = 0;
+            if (_keep.Length < _count) _keep = new bool[_marks.Length];
+            Ranked.Clear();
+            var me = Session.PlayerPosition();
+            float meU = uv.center.x, meV = uv.center.y;
+            if (me.HasValue) { var m = Minimap.instance; float span = m.m_textureSize * m.m_pixelSize; meU = me.Value.x / span + 0.5f; meV = me.Value.z / span + 0.5f; }
             for (int i = 0; i < _count; i++)
             {
+                _keep[i] = false;
                 float lx = (_marks[i].U - uv.x) * invW, ly = (_marks[i].V - uv.y) * invH;
                 if (lx < -ViewMargin || lx > 1f + ViewMargin || ly < -ViewMargin || ly > 1f + ViewMargin) continue;
                 if (covered && cover.Contains(new Vector2(rect.xMin + lx * width, rect.yMin + ly * height))) continue;
+                float du = _marks[i].U - meU, dv = _marks[i].V - meV;
+                Ranked.Add(new RankItem { Index = i, Category = _marks[i].Category, Distance = du * du + dv * dv });
+            }
+            Ranked.Sort(ByCategoryDistance);
+            for (int k = 0, run = 0; k < Ranked.Count; k++)
+            {
+                run = k > 0 && Ranked[k].Category == Ranked[k - 1].Category ? run + 1 : 0;
+                if (limit > 0 && run >= limit) { limited++; continue; }
+                _keep[Ranked[k].Index] = true;
+            }
+            InView = Ranked.Count;
+            for (int i = 0; i < _count; i++)
+            {
+                if (!_keep[i]) continue;
+                float lx = (_marks[i].U - uv.x) * invW, ly = (_marks[i].V - uv.y) * invH;
                 int cx = Mathf.Clamp((int)(lx * width / cell), 0, cols - 1), cy = Mathf.Clamp((int)(ly * height / cell), 0, rows - 1);
                 int c = cy * cols + cx;
                 if (_cellCount[c] == 0)
@@ -328,7 +358,6 @@ namespace ValheimNavigator
                 _cellCount[c]++;
                 _cellX[c] += rect.xMin + lx * width;
                 _cellY[c] += rect.yMin + ly * height;
-                InView++;
             }
 
             // single places are ranked by distance to the player, or to the middle of the view when the player is not in it
@@ -391,7 +420,7 @@ namespace ValheimNavigator
 
             Singles.Sort(ByDistance);
             // the pin limit counts per category, the nearest of each category are kept
-            int limit = Settings.MaxPins.Value, take = 0;
+            int take = 0;
             if (CategoryShown.Length < Categories.Order.Length + 1) CategoryShown = new int[Categories.Order.Length + 1];
             Array.Clear(CategoryShown, 0, CategoryShown.Length);
             for (int k = 0; k < Singles.Count; k++)
@@ -417,7 +446,7 @@ namespace ValheimNavigator
                 SinglesShown++;
             }
 
-            SinglesHidden = Singles.Count - take;
+            SinglesHidden = Singles.Count - take + limited;
             if (portalLines) DrawPortals(rect, uv, dots, segs, covered, cover);
             DrawKnown(rect, uv, dots, segs, covered, cover, ref labels);
             DrawRoute(rect, uv, segs, dots, ref labels);

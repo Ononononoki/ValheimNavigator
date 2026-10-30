@@ -34,13 +34,13 @@ namespace ValheimNavigator
         internal static Texture Shade => _shade;
         internal static bool Building => _job != null;
         internal static bool Ready(Minimap map) { return _source == MapAccess.Fog(map) && _shade != null && Version > 0 && _job == null; }
-        internal static bool Active => Settings.TerrainView.Value != 0 || Settings.Contours.Value || Settings.Mist.Value || Settings.Shallows.Value || Settings.Steepness.Value || Settings.AshlandsHeat.Value;
+        internal static bool Active => Settings.OverlayView != 0 || Settings.Contours.Value || Settings.Mist.Value || Settings.Shallows.Value || Settings.Steepness.Value || Settings.AshlandsHeat.Value;
 
         internal static void Dirty() { _dirty = true; DetailOverlay.Dirty(); }
 
         internal static string Key()
         {
-            return Settings.TerrainView.Value + "/" + Settings.Contours.Value + "/" + Settings.Mist.Value + "/" + Settings.Shallows.Value + "/" + Settings.Steepness.Value
+            return Settings.OverlayView + "/" + Settings.Contours.Value + "/" + Settings.Mist.Value + "/" + Settings.Shallows.Value + "/" + Settings.Steepness.Value
                 + "/" + Settings.UnexploredShown + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.ContourAuto.Value + "/" + Settings.MaxSlope.Value + "/" + SharedDrawn;
         }
 
@@ -49,7 +49,7 @@ namespace ValheimNavigator
         // test 16: still 44 to 107 ms with Mist on, the mist was part of the full picture then)
         internal static string FullKey()
         {
-            return Settings.TerrainView.Value + "/" + Settings.Contours.Value + "/" + Settings.Shallows.Value + "/" + Settings.Steepness.Value
+            return Settings.OverlayView + "/" + Settings.Contours.Value + "/" + Settings.Shallows.Value + "/" + Settings.Steepness.Value
                 + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.MaxSlope.Value;
         }
 
@@ -138,7 +138,7 @@ namespace ValheimNavigator
                 {
                     // once per change while the minimap is up: what it shows and why
                     string state = !Settings.MinimapTerrain.Value ? "hidden, MinimapTerrain off"
-                        : Version == 0 ? "waiting for the first picture" : "view " + Settings.TerrainView.Value + " " + (Active && _texture != null ? "shown" : "off (native view, no overlay)") + (Settings.Detail.Value ? " sharp" : " coarse") + ", shade " + shade + ", cartography shade " + shared;
+                        : Version == 0 ? "waiting for the first picture" : "view " + Settings.OverlayView + " " + (Active && _texture != null ? "shown" : "off (native view, no overlay)") + (Settings.Detail.Value ? " sharp" : " coarse") + ", shade " + shade + ", cartography shade " + shared;
                     if (state != _miniState) { _miniState = state; Plugin.Log.LogInfo("minimap view " + state + ", uv " + small.uvRect.width.ToString("F3")); }
                 }
                 if (_miniTerrain.gameObject.activeSelf != terrain) _miniTerrain.gameObject.SetActive(terrain);
@@ -207,7 +207,7 @@ namespace ValheimNavigator
             int side = Math.Min(MaxSide, DetailOverlay.DataSide);
             var job = new Job
             {
-                Key = key, Side = side, View = Settings.TerrainView.Value, Pixel = map.m_pixelSize, Water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f,
+                Key = key, Side = side, View = Settings.OverlayView, Pixel = map.m_pixelSize, Water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f,
                 ContourMeters = Settings.ContourMeters.Value, Danger = Settings.BoatDangerDepth.Value, Warning = Math.Max(Settings.BoatWarningDepth.Value, Settings.BoatDangerDepth.Value),
                 MaxSlope = Settings.MaxSlope.Value, Contours = Settings.Contours.Value, Mist = Settings.Mist.Value, Steep = Settings.Steepness.Value, Shallows = Settings.Shallows.Value,
                 Heat = Settings.AshlandsHeat.Value, ShowUnexplored = Settings.UnexploredShown, Shared = SharedDrawn
@@ -313,7 +313,7 @@ namespace ValheimNavigator
         // the game fades shared land in and out with the Cartography Table button, the layer follows its live value
         internal static Color SharedColor { get { var c = Tint; c.a = Strength * Mathf.Lerp(1f, SharedTint, _sharedFade); return c; } }
         // with the unexplored shade, and over cartography land when our own view is drawn there (the native view keeps the game's tint)
-        internal static bool SharedShown => Settings.UnexploredShown || SharedDrawn && Settings.TerrainView.Value != 0;
+        internal static bool SharedShown => Settings.UnexploredShown || SharedDrawn && Settings.OverlayView != 0;
         // cartography land gets our view while ExplorerShared is on and the game shows the table's map (its Cartography Table switch), so
         // switching the table map off takes our view, contours included, off that land too (test 16)
         internal static bool SharedDrawn => Settings.ExplorerShared.Value && _sharedFade >= 0.5f;

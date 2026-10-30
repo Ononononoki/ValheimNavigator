@@ -52,7 +52,7 @@ namespace ValheimNavigator
         internal static ConfigEntry<bool> IncludeUnexplored;
         internal static ConfigEntry<bool> PortalsOn;
         internal static ConfigEntry<bool> SearchPins;
-        internal static ConfigEntry<bool> ShareLocations, ShareNavigation;
+        internal static ConfigEntry<bool> ShareLocations, ShareNavigation, ShareMap;
         internal static ConfigEntry<float> SyncSeconds, SyncTimeout;
         internal static ConfigEntry<int> SyncKilobytes;
         internal static ConfigEntry<bool> Beds, Vehicles, Tombstones, Tamed, Chests, Contents, CursorTerrain;
@@ -66,6 +66,7 @@ namespace ValheimNavigator
         internal static ConfigEntry<bool> ShowUnexplored;
         internal static ConfigEntry<int> MapMode;
         internal static ConfigEntry<bool> MinimapTerrain, FogClouds;
+        internal static ConfigEntry<int> Structures, StructureLimit, AllStructureLimit;
         // Explorer keeps everything out of the fog, whatever the single switches say
         internal static bool Explorer => MapMode != null && MapMode.Value == 1;
         internal static bool UnexploredShown => !Explorer && ShowUnexplored.Value;
@@ -111,6 +112,11 @@ namespace ValheimNavigator
         internal static ConfigEntry<string> ShipSpeedList, BuildShip;
         internal static ConfigEntry<float> BuildSeconds, ExtraBoatSeconds, LandmarkWeight, CorridorWeight, MaxSwim, JumpSlope, JumpMeters;
         internal static ConfigEntry<float> MapMilliseconds;
+        internal static ConfigEntry<bool> FineTerrain;
+        // the detailed view (4) is drawn by the detailed map layer, Navigator's own pictures treat it as the native view
+        internal static bool DetailedView => TerrainView != null && TerrainView.Value == 4;
+        internal static int OverlayView => DetailedView ? 0 : TerrainView.Value;
+        internal static ConfigEntry<int> FineThreads, FineMemoryMB, LivingMapMode;
         internal static ConfigEntry<int> MaxNodes;
         internal static ConfigEntry<bool> SeaHazards;
         internal static ConfigEntry<bool> Ore;
@@ -128,6 +134,7 @@ namespace ValheimNavigator
             _config = config;
             ShareLocations = config.Bind(Sections.Multiplayer, "ShareLocations", true, "When hosting, share the world's location list with requesting Navigator players. Does not share personal pins, exploration or completion marks.");
             ShareNavigation = config.Bind(Sections.Multiplayer, "ShareNavigation", true, "When hosting, also share portal endpoints and ship positions with requesting Navigator players. Does not share inventories.");
+            ShareMap = config.Bind(Sections.Multiplayer, "ShareMap", true, "When hosting, also share the terraforming, paths, player buildings and location ground of the whole world with requesting Navigator players, so their detailed map matches yours. Each player still sees only their own explored land in Explorer mode.");
             SyncSeconds = Number(config, Sections.Multiplayer, "RefreshSeconds", 60f, 10f, 600f, "How often a supported host is asked for changed locations and navigation objects.");
             SyncTimeout = Number(config, Sections.Multiplayer, "TimeoutSeconds", 15f, 5f, 120f, "How long a guest waits without data before showing limited mode. Local routes remain usable.");
             SyncKilobytes = config.Bind(Sections.Multiplayer, "KilobytesPerFrame", 48, new ConfigDescription("Host transfer budget shared by all requesting players, in kilobytes per frame.", new AcceptableValueRange<int>(24, 240)));
@@ -160,11 +167,18 @@ namespace ValheimNavigator
             ExplorerEdgeMeters.SettingChanged += (s, e) => Layers.Dirty();
             MinimapTerrain = config.Bind(Sections.MapView, "MinimapTerrain", true,
                 "The minimap shows the same map view, contours and unexplored shade as the large map. Off: the game's own minimap.");
+            Structures = config.Bind(Sections.MapView, "Structures", 1, new ConfigDescription("Buildings on the large map and the minimap, top down and colored by material, only the highest layer: 0 none (terrain only), 1 the buildings players placed, 2 every structure in the world (also ruins, villages, altars). Only explored land. Paths, fields and paved ground show in the Detailed map view either way.", new AcceptableValueRange<int>(0, 2)));
+            StructureLimit = config.Bind(Sections.Performance, "StructureLimit", 100000, new ConfigDescription("The most player-placed building pieces drawn on the map (Structures 1).", new AcceptableValueRange<int>(1000, 1000000)));
+            AllStructureLimit = config.Bind(Sections.Performance, "AllStructureLimit", 500000, new ConfigDescription("The most structure pieces drawn on the map when every structure is shown (Structures 2).", new AcceptableValueRange<int>(1000, 1000000)));
             FogClouds = config.Bind(Sections.MapMode, "FogClouds", false,
                 "Experimental: the unexplored shade uses the game's own map clouds and fog color and follows day and night. Its look does not match the game's fog yet. Off: a plain dark shade.");
             SliceMilliseconds = config.Bind(Sections.Performance, "SliceMilliseconds", 1f,
                 new ConfigDescription("The most time a frame spends building the world index when a world loads.", new AcceptableValueRange<float>(0.2f, 5f)));
             MapMilliseconds = Number(config, Sections.Performance, "MapMilliseconds", 4f, 1f, 10f, "The most time a frame spends building map overlays and reading known objects while the large map is open.");
+            FineTerrain = config.Bind(Sections.Performance, "DetailedTerrain", true, "Build a 2 m terrain map from the game's world generator in the background, nearest to you first, and keep it on disk per world (BepInEx\\cache\\ValheimNavigator). Sea deeper than 5 m is left out. The panel shows the progress.");
+            FineThreads = config.Bind(Sections.Performance, "DetailedTerrainThreads", 3, new ConfigDescription("Background threads that build the detailed terrain map. The game's generator gains little beyond 4.", new AcceptableValueRange<int>(1, 8)));
+            FineMemoryMB = config.Bind(Sections.Performance, "DetailedTerrainMemoryMB", 64, new ConfigDescription("Memory for detailed terrain tiles near you. Farther tiles stay on disk.", new AcceptableValueRange<int>(16, 1024)));
+            LivingMapMode = config.Bind(Sections.MapView, "LivingMapMode", 0, new ConfigDescription("With LivingMap installed: 0 Navigator's detailed map is drawn over LivingMap's close-up view, 1 LivingMap's close-up view stays on top.", new AcceptableValueRange<int>(0, 1)));
             ArrivalSeconds = config.Bind(Sections.Performance, "ArrivalSeconds", 2f,
                 new ConfigDescription("How often the arrival check for auto mark runs.", new AcceptableValueRange<float>(0.5f, 10f)));
             RefreshSeconds = config.Bind(Sections.Performance, "RefreshSeconds", 5f,
@@ -175,10 +189,10 @@ namespace ValheimNavigator
             DotSize = Number(config, Sections.Markers, "DotSize", 5f, 3f, 14f, "Radius of single map markers in screen pixels.");
             KnownSize = Number(config, Sections.Markers, "ObjectSize", 7f, 3f, 14f, "Radius of known object markers (ore, sea rocks, beds, ships, tombstones, tamed animals, containers) in screen pixels.");
             TypeIcons = config.Bind(Sections.Markers, "TypeIcons", true, "Use small type symbols instead of plain dots. Groups remain numbered.");
-            Labels = config.Bind(Sections.Markers, "Labels", false, "Show names next to individual location markers when zoomed in.");
+            Labels = config.Bind(Sections.Markers, "Labels", true, "Show names next to individual location markers when zoomed in.");
             SpawnFilter = config.Bind(Sections.Markers, "SpawnFilter", 0, new ConfigDescription("0 all locations, 1 generated locations, 2 not yet generated. This is separate from explored terrain.", new AcceptableValueRange<int>(0, 2)));
             FogTint = Number(config, Sections.MapMode, "FogTint", 0.30f, 0f, 0.65f, "Strength of the shade over personally unexplored terrain when ShowUnexplored is on. 0 is no shade at all, 0.5 a clear fog with the terrain visible through it, the shade is never fully opaque.");
-            TerrainView = config.Bind(Sections.MapView, "View", 0, new ConfigDescription("0 native terrain, 1 biome colors, 2 shaded height above sea level, 3 simplified terrain with hillshade, forests and shores.", new AcceptableValueRange<int>(0, 3)));
+            TerrainView = config.Bind(Sections.MapView, "View", 4, new ConfigDescription("0 native terrain, 1 biome colors, 2 shaded height above sea level, 3 simplified terrain with hillshade, forests and shores, 4 detailed: the game's own look drawn from the 2 m terrain when zoomed in (needs DetailedTerrain, otherwise the native map).", new AcceptableValueRange<int>(0, 4)));
             Detail = config.Bind(Sections.MapView, "Detail", true, "Draw the large map's current view at screen resolution with smooth heights, so contours are continuous lines and views stay sharp when zoomed in.");
             DetailMilliseconds = Number(config, Sections.MapView, "DetailMilliseconds", 3f, 1f, 10f, "Time per frame spent drawing the detailed view after the map stops moving.");
             OpenMapMilliseconds = Number(config, Sections.MapView, "OpenMapMilliseconds", 10f, 1f, 30f, "Time per frame for reading the game's map pictures while the large map is open, when it is more than DetailMilliseconds. The game keeps running behind the map, so keep it modest.");
@@ -232,7 +246,7 @@ namespace ValheimNavigator
             ScrollSpeed.SettingChanged += (s, e) => Panel.ApplyStyle();
             Beds = config.Bind(Sections.KnownWorld, "Beds", false, "Show known beds and their owners.");
             Vehicles = config.Bind(Sections.KnownWorld, "Vehicles", false, "Show known ships and carts. Leave off if another mod already shows them. With ShipPins installed its pins show them and Navigator draws none.");
-            Tombstones = config.Bind(Sections.KnownWorld, "Tombstones", false, "Show known player tombstones and their owners.");
+            Tombstones = config.Bind(Sections.KnownWorld, "Tombstones", true, "Show known player tombstones and their owners.");
             Tamed = config.Bind(Sections.KnownWorld, "Tamed", false, "Show known tamed creatures and their names. Distant positions can be stale.");
             Chests = config.Bind(Sections.KnownWorld, "Chests", false, "Show known player-built containers. This does not open or modify inventories.");
             Contents = config.Bind(Sections.KnownWorld, "Contents", false, "Read available container contents for Find search and inspection. Only data already available to this client is used.");
@@ -259,6 +273,15 @@ namespace ValheimNavigator
             {
                 string title = Categories.Titles[category];
                 AutoMarkCategory[category] = config.Bind(Sections.AutoMark, title, true, "Auto mark searched " + title + " when you arrive.");
+            }
+
+            // once, for players coming from 0.1.x: the map view that was the default then (0, the game's own map) becomes the detailed view,
+            // the new default. a view picked after this stays
+            var settingsVersion = config.Bind(Sections.Debug, "SettingsVersion", 0, "Changes to settings already done for this cfg after an update. Leave it as it is.");
+            if (settingsVersion.Value < 2)
+            {
+                if (TerrainView.Value == 0) { TerrainView.Value = 4; Plugin.Log?.LogInfo("map view set to Detailed, the new default (once after the update)"); }
+                settingsVersion.Value = 2;
             }
         }
 

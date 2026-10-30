@@ -346,7 +346,7 @@ namespace ValheimNavigator
             float screenPixelsPerMeter = size.x / (uv.width * _side * job.Pixel), interval = Settings.ContourMeters.Value;
             job.Interval = !Settings.ContourAuto.Value ? interval : screenPixelsPerMeter >= 0.9f ? Math.Min(interval, 5f) : screenPixelsPerMeter >= 0.35f ? Math.Min(interval, 10f) : interval;
             job.Water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f;
-            job.View = Settings.TerrainView.Value; job.Contours = Settings.Contours.Value; job.Mist = Settings.Mist.Value; job.Steep = Settings.Steepness.Value;
+            job.View = Settings.OverlayView; job.Contours = Settings.Contours.Value; job.Mist = Settings.Mist.Value; job.Steep = Settings.Steepness.Value;
             job.Shallows = Settings.Shallows.Value; job.Heat = Settings.AshlandsHeat.Value; job.Fogged = !Settings.UnexploredShown; job.Shared = TerrainOverlay.SharedDrawn;
             job.Danger = Settings.BoatDangerDepth.Value; job.Warning = Math.Max(Settings.BoatWarningDepth.Value, job.Danger); job.MaxSlope = Settings.MaxSlope.Value;
             return job;

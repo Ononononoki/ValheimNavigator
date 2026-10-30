@@ -48,7 +48,6 @@ namespace ValheimNavigator
             Add(Ui.Toggle(page, "UseWind", "Wind in sailing", 0f, 0f, w, Settings.UseWind, null));
             Add(Ui.Toggle(page, "UsePortals", "Use my portals", 0f, 0f, w, Settings.RoutePortals, null));
             Add(Ui.Toggle(page, "CarryingOre", "Carrying ore", 0f, 0f, w, Settings.CarryingOre, null));
-            Add(Ui.Toggle(page, "DetailedStructures", "Detailed reads buildings (WIP)", 0f, 0f, w, Settings.DetailedStructures, null));
             Add(Ui.Row(page, "SailBias", "Foot or sail", 0f, 0f, w, () => Settings.SailBias.Value < 0.9f ? "More sail" : Settings.SailBias.Value > 1.1f ? "More walk" : "Balanced", () => Mathf.Abs(Settings.SailBias.Value - 1f) > 0.1f,
                 () => { float[] steps = { 1f, 0.6f, 1.6f }; int i = Array.FindIndex(steps, s => Mathf.Abs(s - Settings.SailBias.Value) < 0.05f); Settings.SailBias.Value = steps[(i + 1) % steps.Length]; }));
             Add(Ui.Row(page, "BiomeDanger", "Harder biomes", 0f, 0f, w, () => Navigator.DangerNames[Settings.Danger.Value], () => Settings.Danger.Value != 0,
@@ -60,8 +59,14 @@ namespace ValheimNavigator
                 () => { Settings.MapMode.Value = Settings.MapMode.Value == 1 ? 2 : 1; ModeChoice.Applied(); }));
             Add(Ui.Toggle(page, "MinimapTerrain", "Map view on the minimap", 0f, 0f, w, Settings.MinimapTerrain, null));
             Add(Ui.Toggle(page, "FogClouds", "Game clouds in the shade", 0f, 0f, w, Settings.FogClouds, TerrainOverlay.Dirty));
-            Add(Ui.Row(page, "View", "Map view", 0f, 0f, w, () => new[] { "Terrain", "Biomes", "Height", "Simplified" }[Settings.TerrainView.Value], () => Settings.TerrainView.Value != 0,
-                () => { Settings.TerrainView.Value = (Settings.TerrainView.Value + 1) % 4; Panel.LayersChanged(); }));
+            // the detailed view needs the 2 m terrain, switched off in the cfg the row says so and its hover note explains
+            var view = Ui.Row(page, "View", "Map view", 0f, 0f, w, () => Settings.DetailedView && !Settings.FineTerrain.Value ? "Detailed (off in cfg)" : new[] { "Terrain", "Biomes", "Height", "Simplified", "Detailed" }[Settings.TerrainView.Value],
+                () => Settings.TerrainView.Value != 0, () => { Settings.TerrainView.Value = (Settings.TerrainView.Value + 1) % 5; Panel.LayersChanged(); });
+            var note = view.Button.gameObject.AddComponent<HoverNote>();
+            note.Note = Panel.FineNote; note.When = () => Settings.DetailedView && !Settings.FineTerrain.Value;
+            Add(view);
+            Add(Ui.Row(page, "Structures", "Buildings", 0f, 0f, w, () => new[] { "None", "Placed by players", "All structures" }[Settings.Structures.Value],
+                () => Settings.Structures.Value != 0, () => { Settings.Structures.Value = (Settings.Structures.Value + 1) % 3; }));
             Add(Ui.Toggle(page, "ShowUnexplored", "Show unexplored terrain", 0f, 0f, w, Settings.ShowUnexplored, () => Reveal.Apply(Minimap.instance)));
             Add(Ui.Cycle(page, "FogTint", "Unexplored shade", 0f, 0f, w, Settings.FogTint, new[] { 0f, 0.15f, 0.25f, 0.30f, 0.4f, 0.5f, 0.6f }, "", Panel.LayersChanged));
             Add(Ui.Toggle(page, "Contours", "Contour lines", 0f, 0f, w, Settings.Contours, Panel.LayersChanged));

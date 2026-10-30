@@ -165,6 +165,10 @@ namespace ValheimNavigator
             text.color = color;
             text.textWrappingMode = TextWrappingModes.NoWrap;
             text.overflowMode = TextOverflowModes.Ellipsis;
+            // a text too long for its box gets smaller (down to 60 percent) before it is cut, so words stay readable
+            text.enableAutoSizing = true;
+            text.fontSizeMax = size;
+            text.fontSizeMin = Mathf.Max(8f, size * 0.6f);
             text.raycastTarget = false;
             go.SetActive(true);
             return text;
@@ -386,6 +390,14 @@ namespace ValheimNavigator
             internal void Refresh()
             {
                 State.text = Read();
+                // the state takes the room its text needs (at most 60 percent of the row), the name the rest, so neither is cut or overlaps
+                var row = (RectTransform)Button.transform;
+                float inner = row.sizeDelta.x - 16f;
+                float want = Mathf.Clamp(State.GetPreferredValues(State.text, 2000f, 0f).x + 4f, 30f, inner * 0.6f);
+                var state = (RectTransform)State.transform;
+                state.anchoredPosition = new Vector2(8f + inner - want, 0f); state.sizeDelta = new Vector2(want, state.sizeDelta.y);
+                var name = (RectTransform)Name.transform;
+                name.sizeDelta = new Vector2(inner - want - 6f, name.sizeDelta.y);
                 Tint(Button, Face);
                 State.color = State.text == "On" ? OnInk : State.text == "Off" ? OffInk : Ink;
                 State.fontStyle = State.text == "On" ? FontStyles.Bold : FontStyles.Normal;
