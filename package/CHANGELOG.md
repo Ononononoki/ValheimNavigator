@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.1
+
+- No more game freezes when you pick a new place or change a route switch while a route is being calculated. The old search is stopped and the game no longer waits for it.
+- Routes at sea: aboard a ship, or swimming far from any shore, the route starts sailing from where you are. Swimming near a shore without a ship close by, it stays a swim. Fixed routes that failed at sea, planned from a ship far away, or kept the route map off after a failure.
+- A ship's draft and width are measured once it floats near you. Routes sail around known sea rocks, shallows and gaps that ship would hit. Ships from other mods count as a longship until measured, and the route says so.
+- Sailing no longer cuts across small spits of land near a landing.
+- A start on a rock, on lava or inside a building moves to the nearest open spot. Near the start and the goal, steep ground is avoided again, except in the first and last 4 m.
+- When no way keeps clear of known rocks, trees, walls and harder biomes, they are left out and the route says so, so a route is found far more often.
+- While you follow a route, a new search replaces it only when it is clearly faster, so the line no longer flips between two equal ways.
+- The route follows you every 5 s by default (was 1 s), set once for everyone. Under 5 s the panel says it may slow the game.
+- Long Ashlands trips need far fewer search steps.
+- Detailed routes avoid remembered trees, rocks and walls along the whole way.
+- Comfort prices harder biomes by how much of a zone they cover, and walks around swamp water. Shortest still wades.
+- More boats allows up to three boats on one trip.
+- New Map view row "Lava where it burns" (`LavaEdge`), on by default: lava is drawn where it burns, with a soft edge.
+- Tombs show how long ago each player died.
+- The large map opens more smoothly.
+- The route map builds faster while the game is paused or a menu is open. A dug spot updates its routes after 20 s without changes.
+- Dedicated servers also share terraforming and location ground (not tested yet).
+- Settings of the old route search left the cfg, they are fixed at their defaults.
+- The route map is built again once after the update (a few minutes).
+
 ## 0.2.0
 
 - Detailed map view on the large map and the minimap: the game's own map look drawn from a 2 m terrain map of the world, built in the background and kept on disk, at every zoom. It shows your terraforming, the ground the game shapes around its locations, and your paths, fields and paved ground in the game's own ground textures. The real ground of places you visit is kept too.

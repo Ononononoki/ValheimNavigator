@@ -48,6 +48,8 @@ namespace ValheimNavigator
         private static Color32[] _mask;
         private static int _side, _cacheRow;
         private static bool _cached;
+        // the first read of the game's map pictures: their raw data copied at once, the per pixel work on a background thread
+        private static System.Threading.Tasks.Task _cacheTask;
         // the picture shown
         private static Rect _shownUv, _lastUv;
         private static Vector2 _shownSize, _lastSize;
@@ -174,7 +176,7 @@ namespace ValheimNavigator
             if (height == null || biome == null) return false;
             if (height != _cacheSource)
             {
-                _cacheSource = height; _side = height.width; _cacheRow = 0; _cached = false;
+                _cacheSource = height; _side = height.width; _cacheRow = 0; _cached = false; _cacheTask = null;
                 int n = _side * _side;
                 if (_height == null || _height.Length != n) { _height = new float[n]; _biome = new byte[n]; _mask = new Color32[n]; }
             }
@@ -190,6 +192,31 @@ namespace ValheimNavigator
             int maskStride = mask != null ? Layout(mask.format, out int mr, out int mg, out int mb, out int ma) : Layout(TextureFormat.RFloat, out mr, out mg, out mb, out ma);
             if (mask == null || mask.width != _side) maskStride = 0;
             var maskData = maskStride > 0 ? mask.GetPixelData<byte>(0) : default;
+            // raw textures: one copy now (a few ms), the rest on a background thread, instead of 10 ms a frame for about a second on the first map
+            // opening (31 Oct probe: 20 ms frames with the terrain view)
+            if (_cacheTask != null)
+            {
+                if (!_cacheTask.IsCompleted) return false;
+                bool done = !_cacheTask.IsFaulted;
+                _cacheTask = null;
+                if (done) _cacheRow = _side;
+            }
+            else if (_cacheRow == 0 && rawHeight && biomeStride > 0 && maskStride > 0)
+            {
+                var heights = heightData.ToArray(); var biomes = biomeData.ToArray(); var masks = maskData.ToArray();
+                int side = _side, bs = biomeStride, ms = maskStride, r0 = br, g0 = bg, b0 = bb, r1 = mr, g1 = mg, b1 = mb, a1 = ma;
+                var outHeight = _height; var outBiome = _biome; var outMask = _mask;
+                _cacheTask = System.Threading.Tasks.Task.Run(() =>
+                {
+                    Array.Copy(heights, outHeight, side * side);
+                    for (int k = 0; k < side * side; k++)
+                    {
+                        int s = k * bs; outBiome[k] = (byte)Classify(new Color32(biomes[s + r0], biomes[s + g0], biomes[s + b0], 255));
+                        int q = k * ms; outMask[k] = new Color32(masks[q + r1], masks[q + g1], masks[q + b1], a1 >= 0 ? masks[q + a1] : (byte)255);
+                    }
+                });
+                return false;
+            }
             // the large map hides the game, so it may take more of the frame (the friend's idea, 24 Oct)
             float budget = Minimap.IsOpen() ? Math.Max(Settings.DetailMilliseconds.Value, Settings.OpenMapMilliseconds.Value) : Settings.DetailMilliseconds.Value;
             while (_cacheRow < _side && clock.Elapsed.TotalMilliseconds < budget)
@@ -228,7 +255,7 @@ namespace ValheimNavigator
             internal Rect Uv; internal Vector2 Size; internal string Key;
             internal int W, H, View;
             internal float Interval, Mpp, Pixel, Water, Danger, Warning, MaxSlope;
-            internal bool Contours, Mist, Steep, Shallows, Heat, Fogged, Shared;
+            internal bool Contours, Mist, Steep, Shallows, Heat, Fogged, Shared, LavaEdge;
             internal int[] Cols; internal float[] ColWeights, Wx, Fx;
             internal Color32[] Pixels;
             internal volatile bool Done, Cancel;
@@ -347,7 +374,7 @@ namespace ValheimNavigator
             job.Interval = !Settings.ContourAuto.Value ? interval : screenPixelsPerMeter >= 0.9f ? Math.Min(interval, 5f) : screenPixelsPerMeter >= 0.35f ? Math.Min(interval, 10f) : interval;
             job.Water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f;
             job.View = Settings.OverlayView; job.Contours = Settings.Contours.Value; job.Mist = Settings.Mist.Value; job.Steep = Settings.Steepness.Value;
-            job.Shallows = Settings.Shallows.Value; job.Heat = Settings.AshlandsHeat.Value; job.Fogged = !Settings.UnexploredShown; job.Shared = TerrainOverlay.SharedDrawn;
+            job.Shallows = Settings.Shallows.Value; job.Heat = Settings.AshlandsHeat.Value; job.Fogged = !Settings.UnexploredShown; job.Shared = TerrainOverlay.SharedDrawn; job.LavaEdge = Settings.LavaEdge.Value;
             job.Danger = Settings.BoatDangerDepth.Value; job.Warning = Math.Max(Settings.BoatWarningDepth.Value, job.Danger); job.MaxSlope = Settings.MaxSlope.Value;
             return job;
         }
@@ -583,6 +610,7 @@ namespace ValheimNavigator
                 float fx = job.Fx[px];
                 Color32 m00 = _mask[i00], m01 = _mask[rn * _side + cn1], m10 = _mask[rn1 * _side + cn], m11 = _mask[rn1 * _side + cn1];
                 float blue = ((m00.b * (1f - fx) + m01.b * fx) * (1f - fy) + (m10.b * (1f - fx) + m11.b * fx) * fy) / 255f;
+                if (job.LavaEdge && depth <= 0f) blue = TerrainOverlay.LavaDrawn(blue);
                 Color color = Color.clear;
                 if (view != 0)
                 {
@@ -658,6 +686,7 @@ namespace ValheimNavigator
                     if (degrees > maxSlope * 0.5f) color = TerrainOverlay.Over(color, degrees > maxSlope ? TerrainOverlay.SteepColor : TerrainOverlay.SlopeColor);
                 }
                 // swamp ground under the water line is wading ground, not sea
+                if (job.Shallows && b != 2) depth = TerrainOverlay.FineDepth(wx, wz, job.Water, depth);
                 if (job.Shallows && b != 2 && depth > -gpx && depth < warning + gpx)
                 {
                     float e0 = Mathf.Clamp01(depth / gpx + 0.5f), e1 = Mathf.Clamp01((depth - danger) / gpx + 0.5f), e2 = Mathf.Clamp01((depth - warning) / gpx + 0.5f);

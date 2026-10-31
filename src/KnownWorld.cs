@@ -37,8 +37,12 @@ namespace ValheimNavigator
             // a solid the route remembers: its collider box in the prefab's own frame
             internal bool Solid;
             internal Vector3 Min, Max;
+            // the top of its solid colliders above its origin, MinValue when it has none
+            internal float Top;
         }
         private static readonly Dictionary<int, Kind> Kinds = new Dictionary<int, Kind>();
+        // water kept between a keel and a rock under it
+        private const float KeelMargin = 1f;
         private static readonly List<KnownMark> Pending = new List<KnownMark>();
         private static readonly Dictionary<long, List<KnownMark>> Obstacles = new Dictionary<long, List<KnownMark>>();
         internal static readonly List<KnownMark> Marks = new List<KnownMark>();
@@ -237,11 +241,11 @@ namespace ValheimNavigator
                 }
                 if (signature != _hazardSignature) { _hazardSignature = signature; HazardVersion++; }
                 Ships.Clear(); Ships.AddRange(PendingShips); PendingShips.Clear(); ApplySharedShips();
-                if (Settings.LoadedTerrain.Value && Settings.RememberedWorld.Value && ZonesRead.Count > 0)
+                if (Settings.LoadedTerrain.Value && ZonesRead.Count > 0)
                 {
                     int boxes = PendingBoxes.Count;
                     foreach (var box in PendingBoxes) unchecked { boxes = boxes * 31 + box.X.GetHashCode() ^ box.Z.GetHashCode() * 7 ^ box.Top.GetHashCode(); }
-                    Remembered.ReplaceBoxes(ZonesRead, PendingBoxes);
+                    Remembered.ReplaceBoxesLater(ZonesRead, PendingBoxes);
                     // a changed set of solids is a new world for the kept route, as changed sea hazards are
                     if (boxes != _boxSignature) { _boxSignature = boxes; HazardVersion++; BoxesChanged = true; }
                     PendingBoxes.Clear(); ZonesRead.Clear();
@@ -292,7 +296,8 @@ namespace ValheimNavigator
                     var rock = prefab.GetComponent<MineRock>();
                     if (rock != null && rock.m_areaRoot != null) { kind.Areas = rock.m_areaRoot.GetComponentsInChildren<Collider>(true).Length; kind.AreaHealth = rock.m_health; }
                 }
-                kind.Solid = prefab != null && SolidKind(prefab) && LocalBox(prefab, out kind.Min, out kind.Max);
+                kind.Top = float.MinValue;
+                kind.Solid = prefab != null && SolidKind(prefab) && LocalBox(prefab, out kind.Min, out kind.Max, out kind.Top);
                 if (kind.Hazard && prefab != null)
                     foreach (var renderer in prefab.GetComponentsInChildren<Renderer>(true))
                     {
@@ -303,7 +308,7 @@ namespace ValheimNavigator
                 Kinds.Add(hash, kind);
             }
             var position = zdo.GetPosition();
-            if (Settings.LoadedTerrain.Value && Settings.RememberedWorld.Value)
+            if (Settings.LoadedTerrain.Value)
             {
                 long zone = Remembered.ZoneOf(position.x, position.z);
                 ZonesRead.Add(zone);
@@ -339,6 +344,9 @@ namespace ValheimNavigator
             {
                 float water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f;
                 if (WorldGenerator.instance.GetHeight(position.x, position.z) >= water) return;
+                // a rock whose top stays deeper than the deepest keel (and a margin) is sailed over (test of 10.2.4: Ashlands rocks 23 to 30 m down)
+                float scaleY = Math.Abs(zdo.GetVec3("scale", Vector3.one).y);
+                if (kind.Top > float.MinValue && position.y + kind.Top * scaleY < water - ShipHulls.Deepest - KeelMargin) return;
                 var scale = zdo.GetVec3("scale", Vector3.one);
                 float radius = Mathf.Clamp(kind.Radius * Math.Max(Math.Abs(scale.x), Math.Abs(scale.z)) + Settings.HazardClearance.Value, Settings.HazardClearance.Value, 120f);
                 Pending.Add(new KnownMark { X = position.x, Z = position.z, Radius = radius, Name = kind.Name, Kind = 2 });
@@ -354,9 +362,9 @@ namespace ValheimNavigator
         }
 
         // the box around a prefab's solid colliders in its own frame, from each collider's shape so inactive prefabs work too
-        private static bool LocalBox(GameObject prefab, out Vector3 min, out Vector3 max)
+        private static bool LocalBox(GameObject prefab, out Vector3 min, out Vector3 max, out float top)
         {
-            min = Vector3.one * float.MaxValue; max = Vector3.one * float.MinValue;
+            min = Vector3.one * float.MaxValue; max = Vector3.one * float.MinValue; top = float.MinValue;
             bool any = false;
             var toRoot = prefab.transform.worldToLocalMatrix;
             foreach (var collider in prefab.GetComponentsInChildren<Collider>(true))
@@ -376,13 +384,19 @@ namespace ValheimNavigator
                     default: continue;
                 }
                 var matrix = toRoot * collider.transform.localToWorldMatrix;
+                Vector3 low = Vector3.one * float.MaxValue, high = Vector3.one * float.MinValue;
                 for (int c = 0; c < 8; c++)
                 {
                     var corner = center + Vector3.Scale(size * 0.5f, new Vector3((c & 1) == 0 ? -1f : 1f, (c & 2) == 0 ? -1f : 1f, (c & 4) == 0 ? -1f : 1f));
                     var p = matrix.MultiplyPoint3x4(corner);
-                    min = Vector3.Min(min, p); max = Vector3.Max(max, p);
-                    any = true;
+                    low = Vector3.Min(low, p); high = Vector3.Max(high, p);
                 }
+                // a part wholly above a standing player (a tree crown, a branch) leaves the ground under it walkable, so it does not widen the
+                // box (test 7: tree crowns made remembered forests solid)
+                top = Math.Max(top, high.y);
+                if (low.y > Remembered.Head) continue;
+                min = Vector3.Min(min, low); max = Vector3.Max(max, high);
+                any = true;
             }
             // flat litter and tiny parts are no obstacle. rock formations wider than 24 m are left to the terrain: one box would block far more
             // ground than their uneven shape covers, and in a loaded zone the real colliders decide

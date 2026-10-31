@@ -11,15 +11,20 @@ namespace ValheimNavigator
     // any thread can build it, and the route lab tests the same code
     internal sealed class ZoneGraph
     {
-        internal const int Size = 32, Meters = 64, Step = 2, Version = 5;
+        internal const int Size = 32, Meters = 64, Step = 2, Version = 6;
         // shore links a zone keeps at most, and their spacing in meters
         internal const int ShoreLinks = 16;
+        // biome ranks 0 (none, ocean) to 8 (deep north)
+        internal const int RankCount = 9;
         internal const float ShoreSpacing = 16f;
 
         internal int Zx, Zz;
         internal ulong Signature;
         // the highest biome rank of the zone's points (meadows 1 to deep north 8), for the harder biomes rule in Comfort
         internal byte Rank;
+        // the share of the zone's ground points (out of 255) of each biome rank 0 to 8, so the harder biomes rule counts how much of a zone is
+        // harder, not only whether any point is (version 6, null in older tiles)
+        internal byte[] RankShare;
         // nodes: the point inside the zone (j * Size + i), the layer (0 on foot, 1 at sea)
         internal int[] Cells = new int[0];
         internal byte[] Layers = new byte[0];
@@ -38,6 +43,14 @@ namespace ValheimNavigator
         internal ulong[] NoSwim = new ulong[Size * Size / 64];
 
         internal bool Blocked(int local) => (NoSwim[local >> 6] >> (local & 63) & 1UL) != 0;
+
+        // a copy with other inner costs for one query (rocks and solids it knows), the rest shared
+        internal ZoneGraph Repriced(float[] shortest, float[] comfort)
+        {
+            var copy = (ZoneGraph)MemberwiseClone();
+            copy.Shortest = shortest; copy.Comfort = comfort;
+            return copy;
+        }
 
         // the node of a point on a layer, -1 when the point is no node (built once a graph is used)
         private Dictionary<int, int> _footAt, _seaAt;
@@ -282,6 +295,16 @@ namespace ValheimNavigator
             for (int k = 0; k < seaCross.Count; k++) { var c = seaCross[k]; int m = cross.Count + k; g.CrossNode[m] = c.node; g.CrossSide[m] = c.side; g.CrossOut[m] = c.o; g.CrossIn[m] = c.i; g.CrossOutComfort[m] = c.oc; g.CrossInComfort[m] = c.ic; }
             g.ShoreFoot = shoreFoot.ToArray(); g.ShoreSea = shoreSea.ToArray();
             for (int j = 0; j < Size; j++) for (int i = 0; i < Size; i++) g.Rank = Math.Max(g.Rank, points[R(i, j)].Rank);
+            var ranks = new int[RankCount]; int ground = 0;
+            for (int j = 0; j < Size; j++)
+                for (int i = 0; i < Size; i++)
+                {
+                    var p = points[R(i, j)];
+                    if (p.Surface == NavSurface.Water || p.Surface == NavSurface.AshWater) continue;
+                    ranks[Math.Min(RankCount - 1, (int)p.Rank)]++; ground++;
+                }
+            g.RankShare = new byte[RankCount];
+            for (int k = 0; k < RankCount; k++) g.RankShare[k] = ground == 0 ? (byte)0 : (byte)Math.Round(ranks[k] * 255.0 / ground);
             for (int j = 0; j < Size; j++)
                 for (int i = 0; i < Size; i++)
                     if (noSwim[R(i, j)]) { int local = j * Size + i; g.NoSwim[local >> 6] |= 1UL << (local & 63); }
@@ -336,6 +359,7 @@ namespace ValheimNavigator
         internal void Write(BinaryWriter w)
         {
             w.Write(Version); w.Write(Zx); w.Write(Zz); w.Write(Signature); w.Write(Rank);
+            w.Write(RankShare ?? new byte[RankCount]);
             w.Write(Cells.Length); for (int k = 0; k < Cells.Length; k++) { w.Write((short)Cells[k]); w.Write(Layers[k]); }
             w.Write(From.Length); for (int k = 0; k < From.Length; k++) { w.Write((short)From[k]); w.Write((short)To[k]); w.Write(Shortest[k]); w.Write(Comfort[k]); }
             w.Write(CrossNode.Length);
@@ -349,8 +373,12 @@ namespace ValheimNavigator
 
         internal static ZoneGraph Read(BinaryReader r)
         {
-            if (r.ReadInt32() != Version) throw new InvalidDataException("route zone version");
+            // version 5 has no RankShare (6 added it and changed the Comfort costs in the swamp's water). the store's key file keeps a world's
+            // tiles to one version, the probes read older tiles from disk
+            int version = r.ReadInt32();
+            if (version != Version && version != 5) throw new InvalidDataException("route zone version");
             var g = new ZoneGraph { Zx = r.ReadInt32(), Zz = r.ReadInt32(), Signature = r.ReadUInt64(), Rank = r.ReadByte() };
+            if (version >= 6) g.RankShare = r.ReadBytes(RankCount);
             int nodes = Count(r, MaxNodes);
             g.Cells = new int[nodes]; g.Layers = new byte[nodes];
             for (int k = 0; k < nodes; k++) { g.Cells[k] = r.ReadInt16(); g.Layers[k] = r.ReadByte(); if (g.Cells[k] < 0 || g.Cells[k] >= Size * Size || g.Layers[k] > 1) throw new InvalidDataException("route zone node"); }

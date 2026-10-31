@@ -4,7 +4,7 @@ Two mods in one for Valheim: an interactive world map and a navigator. The large
 
 A Valheim mod by Onononoki. Get it on Thunderstore: https://thunderstore.io/c/valheim/p/Onononoki/ValheimNavigator/
 
-The full description, settings and changelog are in [package/README.md](package/README.md) and [package/CHANGELOG.md](package/CHANGELOG.md).
+The mod page is [package/README.md](package/README.md), every setting with the multiplayer details and the files Navigator keeps is in [SETTINGS.md](SETTINGS.md), the changes in [package/CHANGELOG.md](package/CHANGELOG.md).
 
 ## Multiplayer
 
@@ -14,7 +14,7 @@ Without host support, guests can still use the map views, routes on their own kn
 
 ## Generated files
 
-Navigator keeps a detailed terrain map and a route map per world, map pictures and route tables on disk. They are not deleted when the mod is removed. The folders, their sizes and how to turn the detailed terrain map off are in [package/README.md](package/README.md), section "Files Navigator makes, and how to remove them".
+Navigator keeps a detailed terrain map and a route map per world, map pictures and route tables on disk. They are not deleted when the mod is removed. The folders, their sizes and how to turn the detailed terrain map off are in [SETTINGS.md](SETTINGS.md), section "Files Navigator makes, and how to remove them".
 
 ## Bug reports and feedback
 

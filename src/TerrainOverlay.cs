@@ -38,10 +38,15 @@ namespace ValheimNavigator
 
         internal static void Dirty() { _dirty = true; DetailOverlay.Dirty(); }
 
+        // the game's lava value on ground (its map mask blue) as drawn: with LavaEdge only where it burns, over 0.6 like the game's own lava
+        // check and the routes, with a soft edge of a few hundredths. without it as the game draws it
+        internal const float LavaBurns = 0.6f, LavaSoft = 0.06f;
+        internal static float LavaDrawn(float lava) => Mathf.Clamp01((lava - LavaBurns) / LavaSoft + 0.5f);
+
         internal static string Key()
         {
             return Settings.OverlayView + "/" + Settings.Contours.Value + "/" + Settings.Mist.Value + "/" + Settings.Shallows.Value + "/" + Settings.Steepness.Value
-                + "/" + Settings.UnexploredShown + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.ContourAuto.Value + "/" + Settings.MaxSlope.Value + "/" + SharedDrawn;
+                + "/" + Settings.UnexploredShown + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.ContourAuto.Value + "/" + Settings.MaxSlope.Value + "/" + SharedDrawn + "/" + Settings.LavaEdge.Value;
         }
 
         // the settings the full picture depends on. the explored state (map mode, Show unexplored, cartography land) and the mist are applied
@@ -50,7 +55,7 @@ namespace ValheimNavigator
         internal static string FullKey()
         {
             return Settings.OverlayView + "/" + Settings.Contours.Value + "/" + Settings.Shallows.Value + "/" + Settings.Steepness.Value
-                + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.MaxSlope.Value;
+                + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.MaxSlope.Value + "/" + Settings.LavaEdge.Value;
         }
 
         // one picture being made on a background thread with copies of every setting it uses
@@ -59,7 +64,7 @@ namespace ValheimNavigator
             internal string Key, File;
             internal int Side, View;
             internal float Pixel, Water, ContourMeters, Danger, Warning, MaxSlope;
-            internal bool Contours, Mist, Steep, Shallows, Heat, ShowUnexplored, Shared;
+            internal bool Contours, Mist, Steep, Shallows, Heat, ShowUnexplored, Shared, LavaEdge;
             internal Color32[] Full, Pixels, Shade, SharedShade, Clouds;
             // the shade pictures depend only on the fog, the clouds and the size: unchanged since the last upload, they are not drawn again
             internal string ShadeKey;
@@ -210,7 +215,7 @@ namespace ValheimNavigator
                 Key = key, Side = side, View = Settings.OverlayView, Pixel = map.m_pixelSize, Water = ZoneSystem.instance != null ? ZoneSystem.instance.m_waterLevel : 30f,
                 ContourMeters = Settings.ContourMeters.Value, Danger = Settings.BoatDangerDepth.Value, Warning = Math.Max(Settings.BoatWarningDepth.Value, Settings.BoatDangerDepth.Value),
                 MaxSlope = Settings.MaxSlope.Value, Contours = Settings.Contours.Value, Mist = Settings.Mist.Value, Steep = Settings.Steepness.Value, Shallows = Settings.Shallows.Value,
-                Heat = Settings.AshlandsHeat.Value, ShowUnexplored = Settings.UnexploredShown, Shared = SharedDrawn
+                Heat = Settings.AshlandsHeat.Value, ShowUnexplored = Settings.UnexploredShown, Shared = SharedDrawn, LavaEdge = Settings.LavaEdge.Value
             };
             // the full picture holds no mist (it depends on loaded clearings and goes on in the explored step), so it is always kept
             string memoryKey = World() + "|" + FullKey();
@@ -491,6 +496,14 @@ namespace ValheimNavigator
             return new Texture2D(_side, _side, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
         }
 
+        // boat clearance reads the 2 m ground where its tile is in memory (the map's own heights are a smoothed 12 m grid, test of 10.2.4:
+        // red and yellow bands off the real shallows), the given depth elsewhere
+        internal static float FineDepth(float x, float z, float water, float depth)
+        {
+            int fx = 2 * (int)Math.Round(x / 2f), fz = 2 * (int)Math.Round(z / 2f);
+            return FineTerrain.TryBase(fx, fz, out float height) ? water - height : depth;
+        }
+
         internal static Color32 DepthColor(float depth, float danger, float warning)
         {
             warning = Math.Max(warning, danger);
@@ -537,7 +550,7 @@ namespace ValheimNavigator
                 }
                 else if (job.View == 1) { color = DetailOverlay.BiomeColor(biome); color.a = 0.86f; }
                 // Simplified was drawn only by the sharp view, so the minimap showed the game's map under it (test 15)
-                else if (job.View == 3) color = DetailOverlay.SimplifiedTexel(biome, h, water, slope, slopeZ, mpp, mask.r / 255f, mask.b / 255f, wx, wz);
+                else if (job.View == 3) color = DetailOverlay.SimplifiedTexel(biome, h, water, slope, slopeZ, mpp, mask.r / 255f, job.LavaEdge && h >= water ? LavaDrawn(mask.b / 255f) : mask.b / 255f, wx, wz);
                 if (job.Contours && depth <= 0f)
                 {
                     float interval = job.ContourMeters, level = (h - water) / interval;
@@ -551,9 +564,10 @@ namespace ValheimNavigator
                     float degrees = Mathf.Atan(gradient) * Mathf.Rad2Deg;
                     if (degrees > job.MaxSlope * 0.5f) color = Over(color, degrees > job.MaxSlope ? SteepColor : SlopeColor);
                 }
-                if (job.Shallows && biome != 2) color = Over(color, DepthColor(depth, job.Danger, job.Warning));
+                if (job.Shallows && biome != 2) color = Over(color, DepthColor(FineDepth(wx, wz, water, depth), job.Danger, job.Warning));
                 // the game's mask blue holds the boiling sea gradient on water and the lava amount on ashlands ground
                 float blue = mask.b / 255f;
+                if (job.LavaEdge && depth <= 0f) blue = LavaDrawn(blue);
                 // Simplified paints lava into the ground itself, as the sharp view does
                 if (job.Heat && blue > 0.1f && (depth > 0f || job.View != 3))
                     color = Over(color, depth > 0f ? new Color(BoilingColor.r, BoilingColor.g, BoilingColor.b, blue * 0.45f) : new Color(0.80f, 0.29f, 0.10f, blue * 0.62f));

@@ -29,6 +29,11 @@ namespace ValheimNavigator
         private static System.Collections.Generic.HashSet<long> _zonesSeen = new System.Collections.Generic.HashSet<long>();
         private static float _zoneNext;
         private const float ZoneRerouteSeconds = 5f;
+        // a search started by the rebuild timer while the player follows the route replaces it only when the new route saves at least
+        // KeepGainSeconds or KeepGainShare of the time left, so two near-equal ways do not take turns (follow lab of 31 Oct, trips 198 and 307)
+        private const float KeepGainSeconds = 15f, KeepGainShare = 0.1f;
+        private static bool _hold;
+        internal static int Kept;
         // a zone's ground is ready before its objects: the game, and GapCloser's ObjectLoadBudget more so, make them over several frames. a zone
         // counts as loaded once it has been loaded this long, so its rocks and buildings are there when the route reads it
         private const float ZoneSettleSeconds = 3f;
@@ -64,13 +69,31 @@ namespace ValheimNavigator
             _worker.Start();
         }
 
+        // a search that is no longer wanted is told to stop and left to end on its own (within milliseconds), the game never waits for it
+        // (test of 31 Oct: waiting froze the game up to 4.9 s). it shares the route query and the kept tree, so nothing new starts and
+        // nothing touches it until its thread has ended
+        private static System.Threading.Thread _stopping;
+        private static NavSearch _stoppingSearch;
+        private static bool _again, _againFresh;
+
         private static void StopWorker()
         {
             if (_worker == null) return;
             _stopWorker = true;
-            _worker.Join();
-            _worker = null; _workerSearch = null; _stopWorker = false;
+            _stopping = _worker; _stoppingSearch = _workerSearch;
+            _worker = null; _workerSearch = null;
+        }
+
+        // true while a stopped search's thread still runs. once it has ended its search is canceled here, on the game's thread
+        private static bool Stopping()
+        {
+            if (_stopping == null) return false;
+            if (_stopping.IsAlive) return true;
+            _stopping = null; _stopWorker = false;
+            if (_stoppingSearch != null && !_stoppingSearch.Finished) _stoppingSearch.Cancel();
+            _stoppingSearch = null;
             if (_workerError != null) { Plugin.Log.LogWarning("background route search failed: " + _workerError); _workerError = null; }
+            return false;
         }
 
         private static bool Settled(float x, float z, long key)
@@ -118,7 +141,7 @@ namespace ValheimNavigator
         {
             if (!Destination.HasValue) { Problem = "Pick a destination first."; return; }
             StopWorker();
-            if (Search != null && !Search.Finished) Search.Cancel();
+            if (Search != null && !Search.Finished && Search != _stoppingSearch) Search.Cancel();
             Search = null; Problem = null;
             _running = true; _automatic = false; BoatUsed = false;
             _next = Time.unscaledTime + Settings.RouteRefresh.Value;
@@ -137,8 +160,10 @@ namespace ValheimNavigator
             _world = WorldGenerator.instance;
             if (!player.HasValue || _world == null) { Problem = "Load a world and character first."; return; }
             StopWorker();
+            // the stopped search still ends: this search starts from Tick once it has
+            if (Stopping()) { _again = true; _againFresh = _againFresh || fresh; return; }
             if (Search != null && !Search.Finished) Search.Cancel();
-            Problem = null; _reported = false;
+            Problem = null; _reported = false; _hold = false;
             var target = Destination.Value;
             if (!ExplorerArea.Visible(target.x, target.z)) { Problem = "Explorer mode: the destination is farther than ExplorerEdgeMeters from explored land and farther than ExplorerSenseMeters from you."; return; }
             _last = player.Value;
@@ -190,14 +215,16 @@ namespace ValheimNavigator
                     found = PickShip(player.Value, null, out ship, out prefab, true);
                     build = DrakkarPrefab;
                 }
-                if (found) { options.HasShip = true; options.ShipX = ship.x; options.ShipZ = ship.z; }
-                else if (atSea) { options.HasShip = true; options.ShipX = player.Value.x; options.ShipZ = player.Value.z; prefab = build; }
+                // at sea the ship is under you, a known ship lying elsewhere is not it (test of 10.2.5: a drakkar 6.5 km away was planned from)
+                if (atSea) { options.HasShip = true; options.ShipX = player.Value.x; options.ShipZ = player.Value.z; if (!found) prefab = build; }
+                else if (found) { options.HasShip = true; options.ShipX = ship.x; options.ShipZ = ship.z; }
                 options.BuildBoat = aboard == null && !atSea && (Settings.BoatSource.Value == 1 || !found) && (!BoatUsed || Settings.MoreBoats.Value);
                 NoShipNear = Settings.BoatSource.Value == 2 && !found && !atSea;
                 if (!found && !atSea) prefab = build;
                 options.MoreBoats = Settings.MoreBoats.Value;
                 options.BuildSeconds = Settings.BuildSeconds.Value; options.ExtraBoatSeconds = Settings.ExtraBoatSeconds.Value;
                 options.HeatProof = HeatProofShip(prefab);
+                options.ShipPrefab = prefab;
                 ShipKnown = ShipSpeeds.Of(prefab, out options.ShipPaddle, out options.ShipLow, out options.ShipHigh);
                 // without wind a known ship sails at about half wind, the middle of its measured range
                 options.SailSpeed = options.ShipLow + (options.ShipHigh - options.ShipLow) * 0.47f;
@@ -232,6 +259,11 @@ namespace ValheimNavigator
             }
             // the route map (HPA* over the 2 m ground, RouteStore) finds the route once its zones around you and the destination are built. the
             // grid search below is only the fallback while they are not, or when the route map finds no way
+            // a new start (boarded, left the ship, another ship or a boat to build) tries the route map again (test of 10.2.5: boarded beside the
+            // shore where it failed, the grid search alone never reached)
+            string skipKey = startMode + " " + options.HasShip + " " + options.ShipX.ToString("F0") + " " + options.ShipZ.ToString("F0") + " " + options.BuildBoat;
+            if (_skipGraph && ((player.Value - _skipAt).sqrMagnitude > SkipGraphMeters * SkipGraphMeters || skipKey != _skipKey)) _skipGraph = false;
+            _graphKey = skipKey;
             if (!_skipGraph && GraphRoute(player.Value, target, options)) return;
             // the Ashlands wait for the route map: the grid search checks the ground only every few meters and can lead through lava. the
             // route map builds the tiles around this route first, Follow searches again once they are there
@@ -272,7 +304,7 @@ namespace ValheimNavigator
             float fastestPath = 1f;
             bool paths = loadedTerrain && Settings.SpeedyPaths.Value && SpeedyPaths.Read(out fastestPath) && fastestPath > 1f;
             // Detailed reads only the loaded area. remembered places (test 7: tree crowns made remembered forests solid) only when asked for
-            bool remembered = loadedTerrain && Settings.RememberedWorld.Value;
+            bool remembered = loadedTerrain;
             // the start, the destination and every portal end stay open within a grid cell's reach: the search joins them from the nearest node
             var open = new System.Collections.Generic.List<Vector2> { new Vector2(px, pz), new Vector2(gx, gz) };
             foreach (var p in options.Portals) { open.Add(new Vector2(p[0], p[1])); open.Add(new Vector2(p[2], p[3])); }
@@ -472,12 +504,31 @@ namespace ValheimNavigator
             return ship;
         }
 
-        // in water deeper than a swim out from the shore would leave you, 1 m past the wade depth: you came by boat
+        // over water deeper than 1 m past the wade depth, the route starts sailing when a ship is within AtSeaShipMeters (on its deck the game
+        // may not count you aboard yet, test of 10.2.5) or when you swim out of swim reach (no ground to stand on within half MaxSwim, the route
+        // map's rule): you came by boat. a swim near a shore without a ship near stays a swim (the user's choice B, 31 Oct)
+        private const float AtSeaShipMeters = 20f;
+
         private static bool AtSea(Vector3 at)
         {
-            if (ZoneSystem.instance == null || Player.m_localPlayer == null || !Player.m_localPlayer.InWater()) return false;
-            float ground = Heightmap.GetHeight(at, out float h) ? h : WorldGenerator.instance != null ? WorldGenerator.instance.GetHeight(at.x, at.z) : ZoneSystem.instance.m_waterLevel;
-            return ZoneSystem.instance.m_waterLevel - ground >= Settings.WadeDepth.Value + 1f;
+            if (ZoneSystem.instance == null || Player.m_localPlayer == null) return false;
+            bool shipNear = false;
+            if (Ship.Instances != null)
+                foreach (var item in Ship.Instances)
+                    if (item is Ship s && s != null && (s.transform.position - at).sqrMagnitude <= AtSeaShipMeters * AtSeaShipMeters) { shipNear = true; break; }
+            if (!shipNear && !Player.m_localPlayer.InWater()) return false;
+            float water = ZoneSystem.instance.m_waterLevel;
+            float Ground(Vector3 p) => Heightmap.GetHeight(p, out float h) ? h : WorldGenerator.instance != null ? WorldGenerator.instance.GetHeight(p.x, p.z) : water;
+            if (water - Ground(at) < Settings.WadeDepth.Value + 1f) return false;
+            if (shipNear) return true;
+            if (Settings.MaxSwim.Value <= 0f) return false;
+            float reach = Settings.MaxSwim.Value / 2f;
+            for (int d = 0; d < 8; d++)
+            {
+                float angle = d * Mathf.PI / 4f;
+                if (water - Ground(at + new Vector3(Mathf.Cos(angle) * reach, 0f, Mathf.Sin(angle) * reach)) < Settings.WadeDepth.Value) return false;
+            }
+            return true;
         }
 
         // every surface a player can stand on at a point, lowest first: ground, floors, walkways, upper storeys, with the space above free
@@ -623,7 +674,7 @@ namespace ValheimNavigator
 
         private static void RememberTick()
         {
-            if (ZNet.instance == null || !Settings.LoadedTerrain.Value || !Settings.RememberedWorld.Value) return;
+            if (ZNet.instance == null || !Settings.LoadedTerrain.Value) return;
             long uid = ZNet.instance.GetWorldUID();
             if (uid != _worldUid)
             {
@@ -658,8 +709,13 @@ namespace ValheimNavigator
             if (_rememberedDirty && Time.unscaledTime >= _saveNext)
             {
                 _saveNext = Time.unscaledTime + SaveSeconds; _rememberedDirty = false;
-                try { Remembered.Save(CachePath(_worldUid)); }
-                catch (Exception ex) { Plugin.Log.LogWarning("remembered world could not be saved: " + ex.Message); }
+                // on a background thread: the whole world's trees and rocks make a file of many megabytes
+                string path = CachePath(_worldUid);
+                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try { Remembered.Save(path); }
+                    catch (Exception ex) { Plugin.Log.LogWarning("remembered world could not be saved: " + ex.Message); }
+                });
             }
         }
 
@@ -693,8 +749,13 @@ namespace ValheimNavigator
         private const float CorridorMeters = 1500f;
         private static bool _skipCorridor;
 
-        // the route map found no way to this destination, the grid search decides until another destination is picked
+        // the route map found no way to this destination, the grid search decides until another destination is picked or you are SkipGraphMeters
+        // from where it failed (following at sea tries the route map again)
         private static bool _skipGraph;
+        private static Vector3 _skipAt;
+        // the start the route map failed from (aboard, ship, boat to build), and the start of the search running now
+        private static string _skipKey, _graphKey;
+        private const float SkipGraphMeters = 100f;
         internal static int GraphRoutes, GraphFallbacks;
         // the route came from the grid search because the route map was not built around it yet, it is searched again once it is
         private static bool _graphPending;
@@ -724,10 +785,21 @@ namespace ValheimNavigator
             {
                 StartX = px, StartZ = pz, GoalX = gx, GoalZ = gz, Comfort = options.Comfortable,
                 PortalSeconds = options.PortalSeconds, SwitchSeconds = options.SwitchSeconds, BuildSeconds = options.BuildSeconds, OpenMeters = KeepOpen,
-                BuildBoat = options.BuildBoat, MoreBoats = options.BuildBoat && options.MoreBoats, HasShip = options.HasShip, ShipX = options.ShipX, ShipZ = options.ShipZ, HeatProof = options.HeatProof,
+                BuildBoat = options.BuildBoat, MoreBoats = options.BuildBoat && options.MoreBoats, ExtraBoatSeconds = options.ExtraBoatSeconds, HasShip = options.HasShip, ShipX = options.ShipX, ShipZ = options.ShipZ, HeatProof = options.HeatProof,
                 Stop = () => _stopWorker
             };
             q.Portals.AddRange(options.Portals);
+            // known sea rocks and ice (a copy, the map scan refills the live one), the ship keeps clear of them in both route details
+            var rocks = KnownWorld.ObstacleCopy();
+            if (rocks.Count > 0) q.Rock = (x, z) => KnownWorld.BlockedIn(rocks, x, z);
+            // Detailed: the remembered walls, rocks and trees of the saved world block a step on foot, along the whole way
+            if (Settings.LoadedTerrain.Value)
+            {
+                float water = rules.Water;
+                q.Crosses = (a, b) => Remembered.Crosses(a.X, a.Z, Math.Max(a.Height, water), b.X, b.Z, Math.Max(b.Height, water));
+            }
+            if (q.BuildBoat || q.HasShip) { var hull = ShipHulls.Of(options.ShipPrefab); q.ShipDraft = hull.Draft; q.ShipBeam = hull.Beam; }
+            q.SolidsVersion = KnownWorld.HazardVersion * 31 + (Settings.LoadedTerrain.Value ? Remembered.Version : 0) + ShipHulls.Version * 7919;
             if (options.Boats)
             {
                 // the ship's speed with this route's wind and bias, the zones were built with SailSpeed
@@ -747,12 +819,19 @@ namespace ValheimNavigator
             {
                 int limit = options.DangerRank, szx = RouteQuery.ZoneOf(px), szz = RouteQuery.ZoneOf(pz), gzx = RouteQuery.ZoneOf(gx), gzz = RouteQuery.ZoneOf(gz);
                 float penalty = options.DangerBlock ? float.PositiveInfinity : Math.Max(1f, options.DangerPenalty);
+                // a zone counts by its share of harder ground (a zone that only touches a harder biome is walked nearly as it is), kept out when
+                // more than half of it is harder. the searches inside the zones price each point
                 q.FootFactor = (zx, zz) =>
                 {
                     if (zx == szx && zz == szz || zx == gzx && zz == gzz) return 1f;
                     var zone = RouteStore.Zone(zx, zz);
-                    return zone != null && zone.Rank > limit ? penalty : 1f;
+                    if (zone == null || zone.Rank <= limit) return 1f;
+                    if (zone.RankShare == null) return penalty;
+                    float share = 0f;
+                    for (int r = limit + 1; r < zone.RankShare.Length; r++) share += zone.RankShare[r] / 255f;
+                    return float.IsInfinity(penalty) ? (share > 0.5f ? penalty : 1f) : 1f + (penalty - 1f) * share;
                 };
+                q.DangerRank = limit; q.DangerPenalty = penalty;
             }
             // one query kept while the route map keeps its rules: its ground points and portal searches serve the next route too
             if (_query == null || _queryRules != rules) { _query = new RouteQuery(RouteStore.Zone, RouteStore.Sample, rules); _queryRules = rules; }
@@ -910,8 +989,8 @@ namespace ValheimNavigator
         internal static void Clear()
         {
             KnownWorld.CancelRoute();
-            StopWorker();
-            if (Search != null && !Search.Finished) Search.Cancel();
+            StopWorker(); _again = false;
+            if (Search != null && !Search.Finished && Search != _stoppingSearch) Search.Cancel();
             Search = null; Destination = null; Problem = null; _waiting = false;
             _display = null; _running = false; _tree = null; _last = null;
             Name = "Pick a place in Find, or click the World map."; _world = null;
@@ -921,8 +1000,8 @@ namespace ValheimNavigator
         internal static void Cancel()
         {
             _waiting = false; _running = false; KnownWorld.CancelRoute();
-            StopWorker();
-            if (Search != null && !Search.Finished) Search.Cancel();
+            StopWorker(); _again = false;
+            if (Search != null && !Search.Finished && Search != _stoppingSearch) Search.Cancel();
             Problem = "Calculation canceled."; Layers.Dirty();
         }
 
@@ -932,6 +1011,8 @@ namespace ValheimNavigator
             if (Destination.HasValue) Abstraction.Tick(Minimap.instance);
             RememberTick();
             LocalTick();
+            if (Stopping()) return;
+            if (_again) { _again = false; bool fresh = _againFresh; _againFresh = false; Calculate(fresh); return; }
             if (_waiting)
             {
                 if (KnownWorld.Busy) return;
@@ -959,20 +1040,20 @@ namespace ValheimNavigator
                     if (_threaded) { StartWorker(Search); return; }
                     Search.Step(Settings.RouteBudget.Value);
                 }
-                // no way to the Ashlands on the route map: said so, the grid search is not trusted there (lava)
-                if (Search.Finished && Search.GraphFailed && Destination.HasValue && Ashlands(Destination.Value))
+                // no way to the Ashlands on the route map without a heat-proof ship: said so, the grid search is not trusted there (lava). with one,
+                // the grid search below still tries
+                if (Search.Finished && Search.GraphFailed && Destination.HasValue && Ashlands(Destination.Value) && !Search.Options.HeatProof)
                 {
-                    bool heat = Search.Options.HeatProof;
-                    if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map found no way to the Ashlands" + (heat ? "" : " without a heat-proof ship") + " (" + Search.GraphNote + ")");
+                    if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map found no way to the Ashlands without a heat-proof ship (" + Search.GraphNote + ")");
                     Search = null; _running = false;
-                    Problem = heat ? "No way there was found. Lava, cliffs or the boiling sea cut it off. Try a nearer place or a portal there."
-                        : "No way there is known. The Ashlands need a heat-proof ship (a drakkar) or a portal there.";
+                    Problem = "No way there is known. The Ashlands need a heat-proof ship (a drakkar) or a portal there.";
                     Layers.Dirty();
                     return;
                 }
                 if (Search.Finished && Search.GraphFailed)
                 {
-                    _skipGraph = true; GraphFallbacks++;
+                    _skipGraph = true; GraphFallbacks++; _skipKey = _graphKey;
+                    _skipAt = Player.m_localPlayer != null ? Player.m_localPlayer.transform.position : Vector3.zero;
                     if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map found no way (" + Search.GraphNote + "), the grid search is used");
                     Calculate(true);
                     return;
@@ -986,7 +1067,17 @@ namespace ValheimNavigator
                 }
                 if (Search.Finished)
                 {
-                    if (!Search.Cancelled && Search.Points.Count > 0) { _display = Search; _zonesSeen = LoadedZones(Search); StartLocal(Search); }
+                    if (!Search.Cancelled && Search.Points.Count > 0)
+                    {
+                        if (_hold && Keep(Search))
+                        {
+                            Kept++;
+                            if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route kept, the new search saves " + (_display.Summed - Search.Summed).ToString("F0") + " s of " + _display.Summed.ToString("F0") + " s (" + Kept + " kept so far)");
+                            Search = _display; _reported = true;
+                        }
+                        else { _display = Search; _zonesSeen = LoadedZones(Search); StartLocal(Search); }
+                    }
+                    _hold = false;
                     _next = Time.unscaledTime + Settings.RouteRefresh.Value;
                     Layers.Dirty();
                     if (!_reported && Plugin.LogCounters.Value)
@@ -1005,6 +1096,16 @@ namespace ValheimNavigator
             }
         }
 
+        // the route shown stays when the player is on it and the new one is not clearly faster
+        private static bool Keep(NavSearch fresh)
+        {
+            var old = _display;
+            var at = Session.PlayerPosition();
+            if (old == null || old == fresh || !old.Finished || old.Cancelled || !old.Reached || old.Points.Count < 2 || !fresh.Reached || !at.HasValue) return false;
+            if (old.Trim(at.Value.x, at.Value.z) > Settings.OffRouteMeters.Value) return false;
+            return old.Summed - fresh.Summed < Mathf.Min(KeepGainSeconds, old.Summed * KeepGainShare);
+        }
+
         // every update the line behind the player is trimmed. a new search only runs off the route, after a teleport, when known sea hazards
         // changed or when the kept tree is older than the rebuild time. nothing else rescans the world's objects
         private static void Follow()
@@ -1017,7 +1118,8 @@ namespace ValheimNavigator
             // leaving the ship leaves it where it is, so the kept tree's boarding place is out of date
             bool left = _wasAboard && Aboard() == null;
             if (left) BoatUsed = true;
-            if (KnownWorld.HazardVersion != _hazards || left || Time.unscaledTime - _treeBuilt >= Settings.RouteRebuildSeconds.Value) { Calculate(true); return; }
+            if (KnownWorld.HazardVersion != _hazards || left) { Calculate(true); return; }
+            if (Time.unscaledTime - _treeBuilt >= Settings.RouteRebuildSeconds.Value) { Calculate(true); _hold = _display != null; return; }
             if (_graphPending && !_skipGraph && Destination.HasValue && RouteStore.Ready(p.x, p.z, Destination.Value.x, Destination.Value.z, out _))
             {
                 if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map built around the route, the route is searched on it");
@@ -1101,9 +1203,11 @@ namespace ValheimNavigator
             if (FarShipUsed && Search.Boards && !Search.FirstBuilt) text += "\nThe ship is " + FarShipMeters.ToString("N0") + " m away, beyond ShipMeters (" + Settings.ShipMeters.Value.ToString("N0") + " m), and known on your explored or shared map.";
             else if (FarShipMeters > 0f && !FarShipUsed && Search.WaterLength > 100f) text += "\nThe nearest known ship is " + FarShipMeters.ToString("N0") + " m away, beyond ShipMeters (" + Settings.ShipMeters.Value.ToString("N0") + " m), and not on your explored map, so it is not used.";
             if (Search.Options.Moder && Search.SailLength > 0f) text += "\nPlanned with Moder's power, the wind is behind the ship on every heading.";
+            if (Search.Boards && ShipHulls.Untested(Search.Options.ShipPrefab)) text += "\n" + (ShipName ?? Search.Options.ShipPrefab) + " is untested: its depth and width are not measured yet, a longship's are assumed. Sail it near you for a while and they are measured.";
             if (Search.Boards && !ShipKnown) text += "\n" + ShipName + " is from another mod, longship speeds are assumed (ShipSpeeds in the cfg).";
             if (Search.PortalJumps > 0) text += "\nUses " + Search.PortalJumps + (Search.PortalJumps == 1 ? " portal." : " portals.") + " Set Portals to Don't use when you carry ore.";
             if (Search.Options.Wind && Search.SailLength > 0f) text += "\nPlanned with wind from the " + Compass(-Search.Options.WindX, -Search.Options.WindZ) + ", " + (Search.Options.WindIntensity * 100f).ToString("F0") + " %.";
+            if (Search.GraphPlain) text += "\nNo way kept clear of known rocks, trees, walls and harder biomes, so they were left out. Watch for them on the way.";
             if (Settings.LoadedTerrain.Value) text += Settings.DetailedStructures.Value ? "\nDetailed is a work in progress. Buildings are read and may fail inside them." : "\nDetailed is a work in progress. It reads the nearby terrain, rocks and trees, not buildings.";
             if (Search.LongestSwim > LongSwim) text += "\nA " + Search.LongestSwim.ToString("N0") + " m swim. Stamina may run out.";
             if (Search.DangerLength > 0f)

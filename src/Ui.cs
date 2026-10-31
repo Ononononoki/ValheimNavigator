@@ -425,9 +425,10 @@ namespace ValheimNavigator
         }
 
         // a number that steps through the given choices on each click
-        internal static Switch Cycle(Transform parent, string name, string label, float x, float y, float w, ConfigEntry<float> entry, float[] choices, string unit, Action changed = null)
+        // a value under warnBelow says it may slow the game
+        internal static Switch Cycle(Transform parent, string name, string label, float x, float y, float w, ConfigEntry<float> entry, float[] choices, string unit, Action changed = null, float warnBelow = 0f)
         {
-            return Row(parent, name, label, x, y, w, () => entry.Value.ToString("0.#") + unit, () => false, () =>
+            return Row(parent, name, label, x, y, w, () => entry.Value.ToString("0.#") + unit + (entry.Value < warnBelow ? " (may slow game)" : ""), () => false, () =>
             {
                 int next = 0;
                 for (int i = 0; i < choices.Length; i++)

@@ -31,7 +31,8 @@ namespace ValheimNavigator
         internal const float Knee = 0.6f, Head = 1.8f, Body = 0.3f, StepUp = 1f;
         private const float BoxCell = 32f;
 
-        private static readonly Dictionary<long, List<Box>> BoxesByCell = new Dictionary<long, List<Box>>();
+        // replaced whole on every change, so a route on a background thread reads one finished index
+        private static volatile Dictionary<long, List<Box>> BoxesByCell = new Dictionary<long, List<Box>>();
         private static readonly Dictionary<long, List<Box>> BoxesByZone = new Dictionary<long, List<Box>>();
         private static readonly Dictionary<long, Snapshot> Snapshots = new Dictionary<long, Snapshot>();
         internal static int BoxCount, Version;
@@ -40,30 +41,43 @@ namespace ValheimNavigator
         internal static long Key(int x, int z) { return ((long)x << 32) | (uint)z; }
         internal static long ZoneOf(float x, float z) { return Key((int)Math.Floor((x + ZoneSize / 2f) / ZoneSize), (int)Math.Floor((z + ZoneSize / 2f) / ZoneSize)); }
 
+        // the boxes by zone are changed under Gate, the index by cell is rebuilt there and swapped whole
+        private static readonly object Gate = new object();
+
         internal static void Clear()
         {
-            BoxesByCell.Clear(); BoxesByZone.Clear(); Snapshots.Clear(); BoxCount = 0; Version++;
+            lock (Gate) { BoxesByCell = new Dictionary<long, List<Box>>(); BoxesByZone.Clear(); Snapshots.Clear(); BoxCount = 0; Version++; }
         }
 
         // a scan's boxes replace the remembered ones of every zone it read, zones it did not read keep theirs
         internal static void ReplaceBoxes(ICollection<long> zonesRead, List<Box> boxes)
         {
-            foreach (long zone in zonesRead) BoxesByZone.Remove(zone);
-            foreach (var box in boxes)
+            lock (Gate)
             {
-                if (!BoxesByZone.TryGetValue(box.Zone, out var list)) BoxesByZone[box.Zone] = list = new List<Box>();
-                list.Add(box);
+                foreach (long zone in zonesRead) BoxesByZone.Remove(zone);
+                foreach (var box in boxes)
+                {
+                    if (!BoxesByZone.TryGetValue(box.Zone, out var list)) BoxesByZone[box.Zone] = list = new List<Box>();
+                    list.Add(box);
+                }
+                RebuildCells();
             }
-            RebuildCells();
+        }
+
+        // the same on a background thread, so a scan of the whole world (every tree and rock) does not hold up a frame
+        internal static void ReplaceBoxesLater(ICollection<long> zonesRead, List<Box> boxes)
+        {
+            var zones = new List<long>(zonesRead); var copy = new List<Box>(boxes);
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { ReplaceBoxes(zones, copy); } catch (Exception) { } });
         }
 
         private static void RebuildCells()
         {
-            BoxesByCell.Clear(); BoxCount = 0;
+            var cells = new Dictionary<long, List<Box>>(); int count = 0;
             foreach (var list in BoxesByZone.Values)
                 foreach (var box in list)
                 {
-                    BoxCount++;
+                    count++;
                     float reach = (float)Math.Sqrt(box.HalfX * box.HalfX + box.HalfZ * box.HalfZ);
                     int x0 = (int)Math.Floor((box.X - reach) / BoxCell), x1 = (int)Math.Floor((box.X + reach) / BoxCell);
                     int z0 = (int)Math.Floor((box.Z - reach) / BoxCell), z1 = (int)Math.Floor((box.Z + reach) / BoxCell);
@@ -71,10 +85,11 @@ namespace ValheimNavigator
                         for (int cx = x0; cx <= x1; cx++)
                         {
                             long key = Key(cx, cz);
-                            if (!BoxesByCell.TryGetValue(key, out var cell)) BoxesByCell[key] = cell = new List<Box>();
+                            if (!cells.TryGetValue(key, out var cell)) cells[key] = cell = new List<Box>();
                             cell.Add(box);
                         }
                 }
+            BoxesByCell = cells; BoxCount = count;
             Version++;
         }
 
@@ -89,7 +104,8 @@ namespace ValheimNavigator
         internal static bool Point(float x, float z, float floor, out float top, out bool blocked)
         {
             top = floor; blocked = false;
-            if (BoxCount == 0 || !BoxesByCell.TryGetValue(Key((int)Math.Floor(x / BoxCell), (int)Math.Floor(z / BoxCell)), out var cell)) return false;
+            var cells = BoxesByCell;
+            if (BoxCount == 0 || !cells.TryGetValue(Key((int)Math.Floor(x / BoxCell), (int)Math.Floor(z / BoxCell)), out var cell)) return false;
             bool any = false;
             float highest = float.MinValue;
             foreach (var box in cell)
@@ -107,6 +123,7 @@ namespace ValheimNavigator
         // true when the straight step between two points passes a box that fills the space a player needs and is too high to step onto
         internal static bool Crosses(float ax, float az, float floorA, float bx, float bz, float floorB)
         {
+            var cells = BoxesByCell;
             if (BoxCount == 0) return false;
             float floor = Math.Min(floorA, floorB), rise = Math.Max(floorA, floorB);
             int x0 = (int)Math.Floor(Math.Min(ax, bx) / BoxCell), x1 = (int)Math.Floor(Math.Max(ax, bx) / BoxCell);
@@ -114,7 +131,7 @@ namespace ValheimNavigator
             for (int cz = z0; cz <= z1; cz++)
                 for (int cx = x0; cx <= x1; cx++)
                 {
-                    if (!BoxesByCell.TryGetValue(Key(cx, cz), out var cell)) continue;
+                    if (!cells.TryGetValue(Key(cx, cz), out var cell)) continue;
                     foreach (var box in cell)
                     {
                         if (box.Bottom >= rise + Head || box.Top <= floor + Knee || box.Top - floor <= StepUp) continue;
@@ -144,7 +161,7 @@ namespace ValheimNavigator
 
         internal static bool HasSnapshot(long zone, uint revision) { return Snapshots.TryGetValue(zone, out var s) && s.Revision == revision; }
 
-        internal static void Store(long zone, Snapshot snapshot) { Snapshots[zone] = snapshot; Version++; }
+        internal static void Store(long zone, Snapshot snapshot) { lock (Gate) { Snapshots[zone] = snapshot; Version++; } }
 
         // the remembered real ground at a point (bilinear) and its ground type, false where no snapshot covers it
         internal static bool Ground(float x, float z, out float height, out int ground)
@@ -170,12 +187,14 @@ namespace ValheimNavigator
             x = zx * ZoneSize - ZoneSize / 2f + i * Step; z = zz * ZoneSize - ZoneSize / 2f + j * Step;
         }
 
-        private const int FileVersion = 1;
+        // 2: boxes without the parts above a standing player (tree crowns)
+        private const int FileVersion = 2;
 
         internal static void Save(string path)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             string temp = path + ".tmp";
+            lock (Gate)
             using (var w = new BinaryWriter(File.Create(temp)))
             {
                 w.Write(FileVersion);
@@ -202,6 +221,7 @@ namespace ValheimNavigator
         {
             Clear();
             if (!File.Exists(path)) return false;
+            lock (Gate)
             using (var r = new BinaryReader(File.OpenRead(path)))
             {
                 if (r.ReadInt32() != FileVersion) return false;
@@ -223,8 +243,8 @@ namespace ValheimNavigator
                     snap.Ground = r.ReadBytes(Side * Side);
                     Snapshots[zone] = snap;
                 }
+                RebuildCells();
             }
-            RebuildCells();
             return true;
         }
     }

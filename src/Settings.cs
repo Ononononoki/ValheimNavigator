@@ -56,7 +56,11 @@ namespace ValheimNavigator
         internal static ConfigEntry<float> SyncSeconds, SyncTimeout;
         internal static ConfigEntry<int> SyncKilobytes;
         internal static ConfigEntry<bool> Beds, Vehicles, Tombstones, Tamed, Chests, Contents, CursorTerrain;
-        internal static ConfigEntry<float> RouteRefresh, OffRouteMeters, TeleportMeters, RouteRebuildSeconds, SearchWeight;
+        internal static ConfigEntry<float> RouteRefresh, OffRouteMeters, TeleportMeters;
+        // the old grid search's tuning, fixed since the route map serves the routes (31 Oct 2026): it only fills in while the route map is built
+        internal static Fixed<float> RouteRebuildSeconds, SearchWeight, CellMeters, SampleMeters, RouteBudget, LandmarkWeight, CorridorWeight;
+        internal static Fixed<bool> SpeedyPaths, RememberedWorld;
+        internal static Fixed<int> MaxNodes;
         internal static ConfigEntry<bool> MiniRoute;
         internal static readonly Dictionary<string, ConfigEntry<bool>> OreTypes = new Dictionary<string, ConfigEntry<bool>>();
         internal static ConfigEntry<bool> PortalLines;
@@ -97,27 +101,23 @@ namespace ValheimNavigator
         internal static ConfigEntry<bool> Mist;
         internal static ConfigEntry<bool> Shallows;
         internal static ConfigEntry<bool> Steepness;
-        internal static ConfigEntry<bool> AshlandsHeat;
+        internal static ConfigEntry<bool> AshlandsHeat, LavaEdge;
         internal static ConfigEntry<float> BoatDangerDepth;
         internal static ConfigEntry<float> BoatWarningDepth;
-        internal static ConfigEntry<float> CellMeters;
-        internal static ConfigEntry<float> SampleMeters;
-        internal static ConfigEntry<float> RouteBudget;
         internal static ConfigEntry<float> MaxSlope;
         internal static ConfigEntry<float> SlopePenalty;
         internal static ConfigEntry<float> WalkSpeed;
         internal static ConfigEntry<float> SwimSpeed, SwimRisk, WadeDepth, SailSpeed, ShipDraft, ShipMeters, SailBias, DangerPenalty;
-        internal static ConfigEntry<bool> UseShip, RoutePortals, CarryingOre, UseWind, MoreBoats, LoadedTerrain, SpeedyPaths, RememberedWorld, DetailedStructures;
+        internal static ConfigEntry<bool> UseShip, RoutePortals, CarryingOre, UseWind, MoreBoats, LoadedTerrain, DetailedStructures;
         internal static ConfigEntry<int> Danger, BoatSource;
         internal static ConfigEntry<string> ShipSpeedList, BuildShip;
-        internal static ConfigEntry<float> BuildSeconds, ExtraBoatSeconds, LandmarkWeight, CorridorWeight, MaxSwim, JumpSlope, JumpMeters;
+        internal static ConfigEntry<float> BuildSeconds, ExtraBoatSeconds, MaxSwim, JumpSlope, JumpMeters;
         internal static ConfigEntry<float> MapMilliseconds;
         internal static ConfigEntry<bool> FineTerrain;
         // the detailed view (4) is drawn by the detailed map layer, Navigator's own pictures treat it as the native view
         internal static bool DetailedView => TerrainView != null && TerrainView.Value == 4;
         internal static int OverlayView => DetailedView ? 0 : TerrainView.Value;
         internal static ConfigEntry<int> FineThreads, FineMemoryMB, LivingMapMode;
-        internal static ConfigEntry<int> MaxNodes;
         internal static ConfigEntry<bool> SeaHazards;
         internal static ConfigEntry<bool> Ore;
         internal static ConfigEntry<bool> SpawnSafe;
@@ -200,14 +200,15 @@ namespace ValheimNavigator
             ContourMeters = Number(config, Sections.MapView, "ContourMeters", 20f, 5f, 100f, "Vertical interval between contour lines. Every fifth line is stronger.");
             ContourAuto = config.Bind(Sections.MapView, "ContourAuto", true, "Use 10 m and then 5 m contours when zoomed in, never coarser than ContourMeters.");
             Mist = config.Bind(Sections.MapView, "Mist", false, "Show natural Mistlands mist, reduced around loaded clearing sources at ground level. Distant sources and mist particles are unavailable. Map resolution limits small clearings.");
-            Shallows = config.Bind(Sections.MapView, "Shallows", false, "Mark shallow water red below DangerDepth and yellow below WarningDepth. Uses base terrain, not waves or constructed obstacles.");
+            Shallows = config.Bind(Sections.MapView, "Shallows", false, "Mark shallow water red below DangerDepth and yellow below WarningDepth. Uses the 2 m terrain where it is built, the base terrain elsewhere, not waves or constructed obstacles.");
             Steepness = config.Bind(Sections.MapView, "Steepness", false, "Shade steep terrain light or dark violet using the map height texture.");
             AshlandsHeat = config.Bind(Sections.MapView, "AshlandsHeat", true, "Tint boiling Ashlands water magenta and lava orange, inside the world's edge only.");
+            LavaEdge = config.Bind(Sections.MapView, "LavaEdge", true, "Draw lava only where it burns (the game's own lava value 0.6, the edge routes keep to). Off draws the game's wider lava look, which reaches past the burning lava.");
             BoatDangerDepth = Number(config, Sections.MapView, "DangerDepth", 1.5f, 0.2f, 10f, "Depth in meters below which shallow water is red.");
             BoatWarningDepth = Number(config, Sections.MapView, "WarningDepth", 3f, 0.5f, 15f, "Depth in meters below which shallow water is yellow.");
-            CellMeters = Number(config, Sections.Routes, "CellMeters", 24f, 12f, 64f, "Route search grid spacing in meters. Smaller grids take longer.");
-            SampleMeters = Number(config, Sections.Routes, "SampleMeters", 6f, 2f, 8f, "Maximum distance between terrain checks along a route edge.");
-            RouteBudget = Number(config, Sections.Routes, "SliceMilliseconds", 2f, 0.5f, 5f, "Route calculation time budget per frame. One terrain check may exceed it.");
+            CellMeters = new Fixed<float>(24f);
+            SampleMeters = new Fixed<float>(6f);
+            RouteBudget = new Fixed<float>(2f);
             MaxSlope = Number(config, Sections.Routes, "MaxSlopeDegrees", 38f, 20f, 60f, "Maximum sampled ground slope in either route mode. The player slides on ground steeper than 38 degrees.");
             SlopePenalty = Number(config, Sections.Routes, "SlopePenalty", 5f, 0f, 20f, "Comfortable mode penalty for steep ground.");
             WalkSpeed = Number(config, Sections.Routes, "WalkMetersPerSecond", 4f, 0.5f, 12f, "Assumed ground travel speed for the approximate time.");
@@ -223,8 +224,8 @@ namespace ValheimNavigator
             ExtraBoatSeconds = Number(config, Sections.Routes, "ExtraBoatSeconds", 120f, 0f, 1800f, "Extra time counted for every boat after the second when MoreBoats is on.");
             LoadedTerrain = config.Bind(Sections.Routes, "LoadedTerrain", false, "Work in progress. In loaded areas the route reads the real ground (your terraforming included) and avoids rocks and trees, and searches again when a zone on the route loads. Off uses only the generated world.");
             DetailedStructures = config.Bind(Sections.Routes, "DetailedStructures", false, "Work in progress. Detailed routes also read your buildings: floors, walls, stairs and doors, with the fine way through a base. It may fail inside buildings.");
-            RememberedWorld = config.Bind(Sections.Routes, "RememberedWorld", false, "Detailed routes also use remembered buildings, rocks and terraforming outside the loaded area. Off: outside the loaded area routes work like Fast. Experimental, slower.");
-            SpeedyPaths = config.Bind(Sections.Routes, "SpeedyPaths", true, "With the SpeedyPaths mod installed, Detailed routes count its faster walking on paths and built floors in the loaded area.");
+            RememberedWorld = new Fixed<bool>(true);
+            SpeedyPaths = new Fixed<bool>(true);
             BuildShip = config.Bind(Sections.Routes, "BuildShip", "Karve", "The kind of boat you build at the shore (Raft, Karve, VikingShip, or a name from ShipSpeeds). A known ship of yours nearby sets the kind instead.");
             ShipSpeedList = config.Bind(Sections.Routes, "ShipSpeeds", "", "Speeds of ships from other mods as Name=paddle/low/high in m/s, separated by commas, for example WarShip=3/5/10. Low is full sail in a light wind, high in a full wind. Unlisted ships sail like a longship.");
             UseWind = config.Bind(Sections.Routes, "UseWind", true, "Routes plan sailing with the predicted wind, from the game's own wind clock.");
@@ -237,7 +238,7 @@ namespace ValheimNavigator
             SailBias = Number(config, Sections.Routes, "SailBias", 1f, 0.6f, 1.6f, "Foot or sail. Below 1 prefers sailing, above 1 prefers walking.");
             Danger = config.Bind(Sections.Routes, "BiomeDanger", 1, new ConfigDescription("0 off, 1 avoid biomes harder than the destination's, 2 never walk through them, 3 avoid biomes past your progress (bosses beaten). Sailing past them is fine.", new AcceptableValueRange<int>(0, 3)));
             DangerPenalty = Number(config, Sections.Routes, "BiomeDangerPenalty", 4f, 1f, 20f, "Walking time in a harder biome is multiplied by this when BiomeDanger is 1.");
-            MaxNodes = config.Bind(Sections.Routes, "MaxNodes", 160000, new ConfigDescription("Search node limit. An incomplete search is reported as a partial route, never as arrival.", new AcceptableValueRange<int>(5000, 500000)));
+            MaxNodes = new Fixed<int>(160000);
             SeaHazards = config.Bind(Sections.KnownWorld, "SeaHazards", false, "Show known offshore rocks and ice from generated areas. Undiscovered objects outside the client's world data are unavailable.");
             Ore = config.Bind(Sections.KnownWorld, "Ore", false, "Show known ore deposits from generated areas. This does not predict deposits in ungenerated areas.");
             SpawnSafe = config.Bind(Sections.KnownWorld, "SpawnSafe", false, "Show where enemies cannot spawn, from the game's PlayerBase areas. Loaded areas are read live with any mod changes, others use the radius last seen on a loaded object of the same kind.");
@@ -253,14 +254,14 @@ namespace ValheimNavigator
             foreach (string ore in new[] { "Copper", "Tin", "Silver", "Obsidian", "Iron", "Flametal" })
                 OreTypes[ore] = config.Bind(Sections.OreTypes, ore, true, "Include known " + ore.ToLowerInvariant() + " deposits when the ore layer is on.");
             CursorTerrain = config.Bind(Sections.MapView, "CursorReadout", true, "Show map cursor coordinates, ground height above sea level and water depth.");
-            RouteRefresh = Number(config, Sections.Routes, "RefreshSeconds", 1f, 0.5f, 60f, "How often the route follows you. Each update only trims the line behind you, a new search runs only off the route or after a teleport. No world generation is requested.");
+            RouteRefresh = Number(config, Sections.Routes, "RefreshSeconds", 5f, 0.5f, 60f, "How often the route follows you. Each update only trims the line behind you, a new search runs only off the route or after a teleport. Under 5 s may slow the game.");
             MiniRoute = config.Bind(Sections.Routes, "MinimapRoute", true, "Draw the route on the small map in the corner as well as on the large map.");
             OffRouteMeters = Number(config, Sections.Routes, "OffRouteMeters", 25f, 10f, 300f, "Distance from the route line that makes the route recalculate from where you are.");
             TeleportMeters = Number(config, Sections.Routes, "TeleportMeters", 100f, 30f, 1000f, "A jump this far between two route updates counts as a teleport and recalculates the route.");
-            RouteRebuildSeconds = Number(config, Sections.Routes, "RebuildSeconds", 180f, 30f, 1800f, "The kept search behind the route is rebuilt from scratch after this many seconds, in case the world changed.");
-            SearchWeight = Number(config, Sections.Routes, "SearchWeight", 1.5f, 1f, 3f, "How strongly the route search heads straight for the goal before the landmark tables are ready. 1 is the exact best route, 1.5 measured at most 4.6 percent longer.");
-            LandmarkWeight = Number(config, Sections.Routes, "LandmarkWeight", 1.2f, 1f, 3f, "The search weight once the landmark tables are built (a few seconds after a world loads). 1.2 measured at most 1.9 percent longer with half the work of 1.5.");
-            CorridorWeight = Number(config, Sections.Routes, "CorridorWeight", 1f, 1f, 3f, "The search weight inside the corridor of a long route. 1 finds the best route the corridor holds.");
+            RouteRebuildSeconds = new Fixed<float>(180f);
+            SearchWeight = new Fixed<float>(1.5f);
+            LandmarkWeight = new Fixed<float>(1.2f);
+            CorridorWeight = new Fixed<float>(1f);
             Opacity.SettingChanged += (s, e) => Panel.ApplyStyle();
             ClickSounds = config.Bind(Sections.General, "ClickSounds", true, "Play the game's menu click sound on ValheimNavigator buttons.");
             ClickSounds.SettingChanged += (s, e) => Panel.ApplyStyle();
@@ -283,10 +284,19 @@ namespace ValheimNavigator
                 if (TerrainView.Value == 0) { TerrainView.Value = 4; Plugin.Log?.LogInfo("map view set to Detailed, the new default (once after the update)"); }
                 settingsVersion.Value = 2;
             }
+            // once, for players coming from 0.2.0: the route follows every 5 s, the new default (1 s did more work than needed)
+            if (settingsVersion.Value < 3)
+            {
+                if (RouteRefresh.Value < 5f) { RouteRefresh.Value = 5f; Plugin.Log?.LogInfo("route follows every 5 s, the new default (once after the update)"); }
+                settingsVersion.Value = 3;
+            }
         }
 
         // background map work gets the larger budget while the large map is open and someone is waiting for it
         internal static float MapBudget => Minimap.instance != null && Minimap.instance.m_mode == Minimap.MapMode.Large ? MapMilliseconds.Value : SliceMilliseconds.Value;
+
+        // a value kept fixed in the code, read like a setting
+        internal sealed class Fixed<T> { internal readonly T Value; internal Fixed(T value) { Value = value; } }
 
         private static ConfigEntry<float> Number(ConfigFile config, string section, string key, float value, float min, float max, string description)
         {

@@ -115,7 +115,7 @@ namespace ValheimNavigator
             Ui.Tag(parent, "NextPage", ">", 282f, y, 34f, 28f, 16f, TextAlignmentOptions.Midline, () => { _page++; Fill(); }, out unused);
             var note = Ui.Label(parent, "Note", 0f, y + 34f, Panel.PageWidth, 40f, 12f, TextAlignmentOptions.TopLeft, Ui.Dim);
             note.textWrappingMode = TextWrappingModes.Normal;
-            note.text = "Tombstones of all players in this world, nearest first. Click one for a route. Guests see the host's list when the host shares map data.";
+            note.text = "Tombstones of all players in this world, nearest first, with the world time since the death. Click one for a route. Guests see the host's list when the host shares map data.";
         }
 
         internal override void Show() { Fill(); }
@@ -145,11 +145,21 @@ namespace ValheimNavigator
                 _rows[i].gameObject.SetActive(on);
                 if (!on) continue;
                 var g = _shown[k];
-                _texts[i].text = (string.IsNullOrEmpty(g.Owner) ? "Unknown" : g.Owner) + "   " + Meters(Distance(g, at));
+                _texts[i].text = (string.IsNullOrEmpty(g.Owner) ? "Unknown" : g.Owner) + "   " + Meters(Distance(g, at)) + Ago(g.Died);
             }
         }
 
         private static float Distance(Tombstones.Grave g, Vector3 at) => NavSearch.Distance(g.X, g.Z, at.x, at.z);
+
+        // the world time since the death (the game keeps it as ZNet time ticks), empty when the tombstone has none
+        private static string Ago(long died)
+        {
+            if (died <= 0L || ZNet.instance == null) return "";
+            double minutes = (ZNet.instance.GetTime().Ticks - died) / (double)TimeSpan.TicksPerMinute;
+            if (minutes < 0) return "";
+            string ago = minutes < 1 ? "just now" : minutes < 60 ? (int)minutes + " min ago" : minutes < 1440 ? (int)(minutes / 60) + " h ago" : (int)(minutes / 1440) + " d ago";
+            return "   died " + ago;
+        }
 
         private static string Meters(float d) => d >= 1000f ? (d / 1000f).ToString("0.0") + " km" : d.ToString("F0") + " m";
 

@@ -42,7 +42,7 @@ namespace ValheimNavigator
             Add(Ui.Toggle(page, "Portals", "Search my portals", 0f, 0f, w, Settings.PortalsOn, Portals.Forget));
             Add(Ui.Cycle(page, "PortalSeconds", "Portal refresh", 0f, 0f, w, Settings.PortalSeconds, new[] { 2f, 5f, 15f, 30f, 60f }, " s"));
             Section(page, "Route");
-            Add(Ui.Cycle(page, "RouteRefresh", "Route follows every", 0f, 0f, w, Settings.RouteRefresh, new[] { 0.5f, 1f, 2f, 5f }, " s"));
+            Add(Ui.Cycle(page, "RouteRefresh", "Route follows every", 0f, 0f, w, Settings.RouteRefresh, new[] { 1f, 2f, 5f, 10f }, " s", null, 5f));
             Add(Ui.Cycle(page, "OffRoute", "Recalculate off route", 0f, 0f, w, Settings.OffRouteMeters, new[] { 25f, 50f, 100f }, " m"));
             Add(Ui.Toggle(page, "UseShip", "Use my ship", 0f, 0f, w, Settings.UseShip, null));
             Add(Ui.Toggle(page, "UseWind", "Wind in sailing", 0f, 0f, w, Settings.UseWind, null));
@@ -81,6 +81,7 @@ namespace ValheimNavigator
             Add(Ui.Cycle(page, "WarningDepth", "Yellow below depth", 0f, 0f, w, Settings.BoatWarningDepth, new[] { 2f, 3f, 4f, 5f }, " m", Panel.LayersChanged));
             Add(Ui.Toggle(page, "SeaHazards", "Known sea rocks and ice", 0f, 0f, w, Settings.SeaHazards, ObjectsChanged));
             Add(Ui.Toggle(page, "AshlandsHeat", "Boiling sea and lava", 0f, 0f, w, Settings.AshlandsHeat, Panel.LayersChanged));
+            Add(Ui.Toggle(page, "LavaEdge", "Lava where it burns", 0f, 0f, w, Settings.LavaEdge, Panel.LayersChanged));
             Section(page, "Known world objects");
             Add(Ui.Toggle(page, "Ore", "Known ore deposits", 0f, 0f, w, Settings.Ore, ObjectsChanged));
             // the ore types open like a dropdown under their own row
@@ -231,7 +232,7 @@ namespace ValheimNavigator
             else
                 _status.text = Session.Status;
             if (Settings.UnexploredShown) _status.text += "\nUnexplored terrain is shown on the large map and in the overview.";
-            _status.text += "\nMist uses the natural mask and loaded clearing sources. Boat clearance uses base depth. Known objects cover generated areas only. Spawn protection is green where loaded, pale where remembered, sand where the radius has not been seen loaded yet.";
+            _status.text += "\nMist uses the natural mask and loaded clearing sources. Boat clearance uses the 2 m depth where it is built. Known objects cover generated areas only. Spawn protection is green where loaded, pale where remembered, sand where the radius has not been seen loaded yet.";
             if (KnownWorld.Problem != null) _status.text += "\nKnown-object scan failed. See the log.";
             if (ZoneSystem.instance != null)
             {

@@ -12,20 +12,29 @@ namespace ValheimNavigator
     {
         public const string ModGuid = "onononoki.ValheimNavigator";
         public const string ModName = "ValheimNavigator";
-        public const string ModVersion = "0.2.0";
+        public const string ModVersion = "0.2.1";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<bool> LogCounters;
         internal static ConfigEntry<float> AutoMarkMeters;
 
+        // a dedicated server reads the terraforming and the ground shaped around locations too, so its guests get them with the map data. not
+        // tested on a real server yet: a failure is told once and the rest of the mod runs on
+        private static bool _dedicatedWarned;
+        private static void DedicatedTerrain()
+        {
+            try { TerrainEdits.Tick(); LocationShaping.Tick(); }
+            catch (System.Exception ex) { if (!_dedicatedWarned) { _dedicatedWarned = true; Log.LogWarning("terraforming and location ground for guests unavailable on this server: " + ex.Message); } }
+        }
+
         private void Update()
         {
             WorldSync.Tick();
             MapShare.Tick();
-            if (ZNet.instance != null && ZNet.instance.IsDedicated()) { if (Enabled.Value) { KnownWorld.Tick(); Tombstones.Tick(); } return; }
+            if (ZNet.instance != null && ZNet.instance.IsDedicated()) { if (Enabled.Value) { KnownWorld.Tick(); Tombstones.Tick(); DedicatedTerrain(); } return; }
             Session.Tick(UnityEngine.Time.deltaTime);
-            if (Enabled.Value) { ExplorerArea.Tick(); KnownWorld.Tick(); Navigator.Tick(); Tombstones.Tick(); }
+            if (Enabled.Value) { ExplorerArea.Tick(); KnownWorld.Tick(); Navigator.Tick(); Tombstones.Tick(); ShipHulls.Tick(); }
             FineTerrain.Tick();
             RouteStore.Tick();
         }

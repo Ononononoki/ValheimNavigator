@@ -45,6 +45,7 @@ namespace ValheimNavigator
             internal Texture2D Height, Mask, Paint;
             internal int OriginX, OriginZ, Texel;
             internal int KeptVersion = -1, EditVersion = -1;
+            internal bool LavaEdge;
             internal float NextDraw;
             internal Task<Window> Drawing;
             internal bool Logged;
@@ -127,14 +128,15 @@ namespace ValheimNavigator
             }
             // drawn again before the view reaches the window's edge
             bool moved = view.Texel != texel || Math.Abs(cx - (view.OriginX + span / 2f)) > span / 6f || Math.Abs(cz - (view.OriginZ + span / 2f)) > span / 6f;
-            bool newer = view.KeptVersion != FineTerrain.KeptVersion || view.EditVersion != TerrainEdits.Version;
+            bool edge = Settings.LavaEdge.Value;
+            bool newer = view.KeptVersion != FineTerrain.KeptVersion || view.EditVersion != TerrainEdits.Version || view.LavaEdge != edge;
             if (view.Drawing == null && (moved || newer && Time.unscaledTime >= view.NextDraw))
             {
                 view.NextDraw = Time.unscaledTime + RedrawSeconds;
-                view.KeptVersion = FineTerrain.KeptVersion; view.EditVersion = TerrainEdits.Version;
+                view.KeptVersion = FineTerrain.KeptVersion; view.EditVersion = TerrainEdits.Version; view.LavaEdge = edge;
                 // texel centers on whole multiples of the texel (even meters), so they are the fine points themselves
                 int ox = (int)Math.Floor((cx - span / 2f) / texel) * texel, oz = (int)Math.Floor((cz - span / 2f) / texel) * texel;
-                view.Drawing = Task.Run(() => Fill(ox, oz, texel));
+                view.Drawing = Task.Run(() => Fill(ox, oz, texel, edge));
             }
 
             var image = view.Image;
@@ -256,7 +258,10 @@ namespace ValheimNavigator
 
         // the 2 m ground, mask and ground paint of the window: the visited ground first, else the generated ground plus your edits. alpha 0
         // where no tile is in memory
-        private static Window Fill(int ox, int oz, int texel)
+        // the Ashlands' biome byte in the fine tiles (FineTerrain.BiomeByte: the biome's bit number)
+        private const byte AshlandsBit = 6;
+
+        private static Window Fill(int ox, int oz, int texel, bool edge)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var w = new Window { OriginX = ox, OriginZ = oz, Texel = texel, Heights = new float[Side * Side], Masks = new Color32[Side * Side], Paints = new Color32[Side * Side] };
@@ -292,6 +297,8 @@ namespace ValheimNavigator
                     float h = visited != null ? visited[point] * FineTerrain.HeightStep
                         : (shaping != null ? LocationShaping.Apply(shaping, x, z, ground * FineTerrain.HeightStep) : ground * FineTerrain.HeightStep) + (edits != null ? edits.Height[point] * FineTerrain.HeightStep : 0f);
                     w.Heights[k] = h;
+                    // the lava where it burns (LavaEdge), on the Ashlands ground only: the mask blue is the boiling sea's gradient on water
+                    if (edge && b > 0 && h >= 30f && (tile == null || tile.Biome[(z - tz * t) / c * n + (x - tx * t) / c] == AshlandsBit)) b = (byte)(TerrainOverlay.LavaDrawn(b / 255f) * 255f + 0.5f);
                     w.Masks[k] = new Color32(r, g, b, 255);
                     byte paint = edits != null ? edits.Paint[point] : TerrainEdits.PaintNone;
                     if (paint != TerrainEdits.PaintNone)

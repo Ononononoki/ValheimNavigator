@@ -20,6 +20,11 @@ namespace ValheimNavigator
         private const int FileVersion = 1;
         private const int MemoryTiles = 1200;
         private const float StatusSeconds = 1f, CheckSeconds = 2f, FullCheckSeconds = 30f;
+        // a zone's ground data must stay the same this long before its zones are built again: visited ground fills in over many seconds
+        // as you walk, each step moved the hash and rebuilt the zone again (30 Oct: about 1000 to 1500 rebuilds a session)
+        private const float SettleSeconds = 20f;
+        private static readonly Dictionary<long, (ulong hash, double since)> Pending = new Dictionary<long, (ulong, double)>();
+        private static readonly System.Diagnostics.Stopwatch _settleClock = System.Diagnostics.Stopwatch.StartNew();
         private const float WorldEdge = 10500f;
 
         private enum State : byte { Unknown, Built, Working, Outside }
@@ -42,6 +47,9 @@ namespace ValheimNavigator
         private static ZoneGraph.Rules _rules;
         private static volatile float _focusX, _focusZ;
         private static volatile bool _wanted;
+        // while the game is paused or its menu is open nobody plays: BoostThreads more threads build the route map then
+        private const int BoostThreads = 2;
+        private static volatile bool _boost;
         private static float _wantX0, _wantZ0, _wantX1, _wantZ1;
         private static long _clockUse;
         private static bool _ownTerrain;
@@ -69,6 +77,7 @@ namespace ValheimNavigator
             if (_world == null && want && Player.m_localPlayer != null) Start(world, RulesKey());
             if (_world == null) { Status = null; Progress = -1f; return; }
             if (Player.m_localPlayer != null) { var p = Player.m_localPlayer.transform.position; _focusX = p.x; _focusZ = p.z; }
+            _boost = Time.timeScale < 0.01f || Menu.IsVisible();
             // without the detailed terrain map nothing else reads the terraforming and the location shaping, the routes need both
             _ownTerrain = FineTerrain.Folder == null;
             if (_ownTerrain) { TerrainEdits.Tick(); LocationShaping.Tick(); }
@@ -107,7 +116,7 @@ namespace ValheimNavigator
             int generation = ++_generation;
             lock (Gate)
             {
-                Kept.Clear(); Signatures.Clear(); Repairs.Clear(); Own.Clear();
+                Kept.Clear(); Signatures.Clear(); Repairs.Clear(); Own.Clear(); Pending.Clear();
                 _inside = _built = _fresh = _diskReads = _repaired = _zonesBuilt = _failed = 0;
                 _buildMilliseconds = 0; _complete = false; _wanted = false;
                 for (int tz = -Half; tz < Half; tz++)
@@ -135,7 +144,7 @@ namespace ValheimNavigator
             if (_world == null) return;
             lock (Gate) _generation++;
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map stopped, " + Summary());
-            lock (Gate) { Kept.Clear(); Signatures.Clear(); Repairs.Clear(); Own.Clear(); }
+            lock (Gate) { Kept.Clear(); Signatures.Clear(); Repairs.Clear(); Own.Clear(); Pending.Clear(); }
             // the detailed terrain map clears these itself when it runs
             if (_ownTerrain && FineTerrain.Folder == null) { TerrainEdits.Clear(true); LocationShaping.Clear(); }
             _world = null; _rules = null; Status = null; Progress = -1f;
@@ -307,15 +316,19 @@ namespace ValheimNavigator
             if (generation != _generation) return;
             _opened = true;
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map started, " + onDisk + " tiles on disk, " + _inside + " tiles in the world, " + threads + " threads");
-            for (int i = 0; i < threads; i++)
-                new Thread(() => Work(generation)) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal, Name = "ValheimNavigator route map " + i }.Start();
+            for (int i = 0; i < threads + BoostThreads; i++)
+            {
+                bool boost = i >= threads;
+                new Thread(() => Work(generation, boost)) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal, Name = "ValheimNavigator route map " + i }.Start();
+            }
             Check(generation);
         }
 
-        private static void Work(int generation)
+        private static void Work(int generation, bool boost)
         {
             while (generation == _generation)
             {
+                if (boost && !_boost) { Thread.Sleep(500); continue; }
                 int k, mask;
                 lock (Gate) k = Pick(out mask);
                 if (k < 0) { Thread.Sleep(250); continue; }
@@ -451,7 +464,7 @@ namespace ValheimNavigator
             {
                 Thread.Sleep((int)(CheckSeconds * 1000f));
                 if (generation != _generation) return;
-                if (TerrainEdits.Version == editVersion && LocationShaping.Signature == shaping && full.Elapsed.TotalSeconds < FullCheckSeconds) continue;
+                if (TerrainEdits.Version == editVersion && LocationShaping.Signature == shaping && full.Elapsed.TotalSeconds < FullCheckSeconds && Pending.Count == 0) continue;
                 editVersion = TerrainEdits.Version; shaping = LocationShaping.Signature; full.Reset(); full.Start();
                 try
                 {
@@ -462,7 +475,14 @@ namespace ValheimNavigator
                     foreach (long key in keys)
                     {
                         ulong own = OwnHash((int)(key >> 32), (int)(uint)key);
-                        lock (Gate) { if (Own.TryGetValue(key, out ulong old) && old == own) continue; Own[key] = own; }
+                        lock (Gate)
+                        {
+                            if (Own.TryGetValue(key, out ulong old) && old == own) { Pending.Remove(key); continue; }
+                            // a new hash waits until it has stayed the same for SettleSeconds
+                            if (!Pending.TryGetValue(key, out var seen) || seen.hash != own) { Pending[key] = (own, _settleClock.Elapsed.TotalSeconds); continue; }
+                            if (_settleClock.Elapsed.TotalSeconds - seen.since < SettleSeconds) continue;
+                            Pending.Remove(key); Own[key] = own;
+                        }
                         changed.Add(key);
                     }
                     lock (Gate) foreach (long key in changed) if (!keys.Contains(key)) Own.Remove(key);

@@ -24,6 +24,8 @@ namespace ValheimNavigator
         internal float WalkSpeed = 4f, WaterLevel = 30f, Radius = 10000f;
         // the player swims only deeper than the wade depth (Character.m_swimDepth 2). swimming drains stamina, so its time is multiplied
         internal float SwimSpeed = 2f, SwimRisk = 5f, WadeDepth = 2f, WadePenalty = 1.3f, BoilingPenalty = 10f;
+        // Comfort: wading and swimming in the swamp's water is slow and full of leeches, it is avoided (the user, 31 Oct)
+        internal float SwampWaterPenalty = 3f;
         // the longest unbroken swim a route may hold, 0 for no limit. on foot a route never stops in water deeper than the wade depth
         internal float MaxSwim;
         // a steep bank up to JumpSlope is jump-run up or slid down when it is at most JumpMeters long, at JumpPenalty times the time. 0 m is off
@@ -31,6 +33,8 @@ namespace ValheimNavigator
         // the ship, sailing speed and draft are estimates. bias below 1 prefers sailing, above 1 prefers walking
         internal bool HasShip, HeatProof;
         internal float ShipX, ShipZ, SailSpeed = 7f, ShipDraft = 1f, SailBias = 1f, SwitchSeconds = 4f;
+        // the prefab of this route's ship, built or yours, for its hull (ShipHulls)
+        internal string ShipPrefab;
         // without a ship to walk to, BuildBoat lets the one sailing leg start at any shore after BuildSeconds, as a player who builds a boat
         // there. MoreBoats allows further legs, each boat built at a shore: the second takes only its build time, every later one ExtraBoatSeconds more
         internal bool BuildBoat, MoreBoats;
@@ -145,6 +149,8 @@ namespace ValheimNavigator
     {
         private readonly Func<float, float, NavPoint> _sample;
         internal readonly NavOptions Options;
+        // the swamp's biome rank (Navigator.Rank)
+        private const byte SwampRank = 3;
         private readonly Dictionary<long, NavPoint> _samples = new Dictionary<long, NavPoint>();
         internal int SampleCount;
 
@@ -219,6 +225,7 @@ namespace ValheimNavigator
                 swum = swim ? swum + step : 0f;
                 if (Options.MaxSwim > 0f && swum > Options.MaxSwim) return float.PositiveInfinity;
                 float seconds = swim ? step / Options.SwimSpeed * Options.SwimRisk : step / Options.WalkSpeed * Options.WadePenalty;
+                if (Options.Comfortable && (before.Rank == SwampRank || next.Rank == SwampRank)) seconds *= Options.SwampWaterPenalty;
                 return boiling ? seconds * Options.BoilingPenalty : seconds;
             }
             swum = 0f;
@@ -660,6 +667,8 @@ namespace ValheimNavigator
         internal bool CorridorFailed;
         internal bool Finished, Reached, Cancelled, Limited;
         internal float Length, Climb, WaterLength, AshWaterLength, Seconds;
+        // the time of the drawn points as Summarize prices them, the same price for a route map route, a grid route and a trimmed one
+        internal float Summed;
         // sailing, swimming and harder-biome walking along the route, the longest unbroken swim, and where the first boat is boarded or built
         internal float SailLength, SwimLength, DangerLength, LongestSwim;
         // the highest biome rank walked through above the danger limit, 0 when none
@@ -700,6 +709,8 @@ namespace ValheimNavigator
         // the route map found no way, the caller searches again with the grid
         internal bool GraphFailed;
         internal string GraphNote;
+        // the route map found a way only with rocks, solids and the danger rule left out
+        internal bool GraphPlain;
         internal bool FromGraph => _query != null;
 
         internal NavSearch(Func<RouteQuery.Result> query, Func<float, float, NavPoint> sample, NavOptions options)
@@ -713,8 +724,10 @@ namespace ValheimNavigator
             var result = _query();
             if (result.Stopped) { Cancel(); return; }
             Expanded = result.Expanded;
-            GraphNote = "route map " + result.Expanded + " nodes, " + result.Zones + " zones, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms";
+            GraphNote = "route map " + result.Expanded + " nodes, " + result.Zones + " zones, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms"
+                + (result.Repairs > 0 ? ", " + result.Repairs + " repair rounds" : "") + (result.PlainHops > 0 ? ", " + result.PlainHops + " hops past rocks or solids" : "") + (result.Plain ? ", rocks, solids and danger left out" : "");
             if (!result.Reached || result.Points.Count < 2) { GraphFailed = true; Finished = true; return; }
+            GraphPlain = result.Plain || result.PlainHops > 0;
             Points.AddRange(result.Points);
             Summarize();
             // the query priced the route on the 2 m ground, boarding one's own ship, landings and portals included
@@ -1025,6 +1038,7 @@ namespace ValheimNavigator
                 float seconds = _terrain.StepSeconds(a, b, ground, mode, mode == 1);
                 Seconds += float.IsInfinity(seconds) ? length / _options.WalkSpeed : seconds;
             }
+            Summed = Seconds;
         }
     }
 }
