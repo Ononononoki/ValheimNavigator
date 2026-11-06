@@ -14,7 +14,7 @@ namespace ValheimNavigator
         internal byte Rank, Mode;
         // walking speed factor here from a path or a built floor (SpeedyPaths), 0 for none
         internal float Speed;
-        // where the point came from: 0 the generated world, 1 a loaded zone, 2 remembered data
+        // where the point came from: 0 the generated world, 1 a loaded zone, 2 remembered data, 3 a measured rock top (RouteStore.RockSource)
         internal byte Source;
     }
 
@@ -22,8 +22,9 @@ namespace ValheimNavigator
     {
         internal float Cell = 24f, Sample = 6f, MaxSlope = 0.78f, SlopePenalty = 5f;
         internal float WalkSpeed = 4f, WaterLevel = 30f, Radius = 10000f;
-        // the player swims only deeper than the wade depth (Character.m_swimDepth 2). swimming drains stamina, so its time is multiplied
-        internal float SwimSpeed = 2f, SwimRisk = 5f, WadeDepth = 2f, WadePenalty = 1.3f, BoilingPenalty = 10f;
+        // the player swims only deeper than the wade depth (Character.m_swimDepth 2). swimming drains stamina, so its time is multiplied.
+        // the Ashlands' boiling water burns, on foot it counts BoilingPenalty times (the user, 1 Nov: closer to lava, 10 was too little)
+        internal float SwimSpeed = 2f, SwimRisk = 5f, WadeDepth = 2f, WadePenalty = 1.3f, BoilingPenalty = 20f;
         // Comfort: wading and swimming in the swamp's water is slow and full of leeches, it is avoided (the user, 31 Oct)
         internal float SwampWaterPenalty = 3f;
         // the longest unbroken swim a route may hold, 0 for no limit. on foot a route never stops in water deeper than the wade depth
@@ -711,6 +712,8 @@ namespace ValheimNavigator
         internal string GraphNote;
         // the route map found a way only with rocks, solids and the danger rule left out
         internal bool GraphPlain;
+        // the route map's route goes through this many steps of remembered walls, rocks or trees (no way around them was found)
+        internal int GraphWalls;
         internal bool FromGraph => _query != null;
 
         internal NavSearch(Func<RouteQuery.Result> query, Func<float, float, NavPoint> sample, NavOptions options)
@@ -725,9 +728,11 @@ namespace ValheimNavigator
             if (result.Stopped) { Cancel(); return; }
             Expanded = result.Expanded;
             GraphNote = "route map " + result.Expanded + " nodes, " + result.Zones + " zones, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms"
-                + (result.Repairs > 0 ? ", " + result.Repairs + " repair rounds" : "") + (result.PlainHops > 0 ? ", " + result.PlainHops + " hops past rocks or solids" : "") + (result.Plain ? ", rocks, solids and danger left out" : "");
+                + (result.Repairs > 0 ? ", " + result.Repairs + " repair rounds" : "") + (result.PlainHops > 0 ? ", " + result.PlainHops + " hops past rocks or solids" : "") + (result.Plain ? ", rocks, solids and danger left out" : "")
+                + (result.Walls > 0 ? ", " + result.Walls + " steps through walls" : "") + (result.Parts != null ? " (" + result.Parts + ")" : "");
             if (!result.Reached || result.Points.Count < 2) { GraphFailed = true; Finished = true; return; }
             GraphPlain = result.Plain || result.PlainHops > 0;
+            GraphWalls = result.Walls;
             Points.AddRange(result.Points);
             Summarize();
             // the query priced the route on the 2 m ground, boarding one's own ship, landings and portals included
@@ -757,14 +762,15 @@ namespace ValheimNavigator
             return (float)Math.Sqrt(dx * dx + dz * dz);
         }
 
-        // lava as the game judges it (Heightmap.IsLava and ZoneSystem.IsLavaPreHeightmap, lavaValue 0.6). 0.1 also closed the glowing ground
-        // around it and cut the Ashlands into pockets no route reached (test of 10.2.3)
-        internal const float LavaValue = 0.6f;
+        // lava is closed wherever the game heats a player (Character.UpdateLava: SmoothStep(0.1, 1, lava) over 0.05, a lava value of about
+        // 0.22). the game's own lava line (lavaValue 0.6) and a slower band below it still let routes cross glowing lava (6 Nov test, the user:
+        // no lava at all, rocks over it are the way across)
+        internal const float LavaHeat = 0.22f;
 
         internal static NavSurface Classify(float height, float water, bool ashlands, float lava, float oceanHeat)
         {
             if (height < water) return oceanHeat >= 0f ? NavSurface.AshWater : NavSurface.Water;
-            return ashlands && lava > LavaValue ? NavSurface.Lava : NavSurface.Land;
+            return ashlands && lava > LavaHeat ? NavSurface.Lava : NavSurface.Land;
         }
 
         private float X(Node node) { return _startX + node.X * _options.Cell; }

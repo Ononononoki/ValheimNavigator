@@ -39,6 +39,8 @@ namespace ValheimNavigator
             internal Vector3 Min, Max;
             // the top of its solid colliders above its origin, MinValue when it has none
             internal float Top;
+            // a building piece walked on (Remembered.Floor, Remembered.Stair, else 0) and its SpeedyPaths ground type by material
+            internal byte Walk, Ground;
         }
         private static readonly Dictionary<int, Kind> Kinds = new Dictionary<int, Kind>();
         // water kept between a keel and a rock under it
@@ -66,6 +68,8 @@ namespace ValheimNavigator
         private static bool _busy, _route, _warned;
         internal static int Version;
         internal static int HazardVersion;
+        // changes with the known sea rocks only, the kept portal searches follow it (the remembered solids by their zone hashes)
+        internal static int RockVersion;
         internal static string Problem;
         private static int _hazardSignature;
         internal static bool Busy => _busy;
@@ -173,7 +177,7 @@ namespace ValheimNavigator
         {
             _manager = null; _sectors = null; _busy = _route = false; _last = _routeData = -1000f;
             Kinds.Clear(); Marks.Clear(); Ships.Clear(); Pending.Clear(); PendingShips.Clear(); Obstacles.Clear();
-            PendingBoxes.Clear(); ZonesRead.Clear(); Version++; HazardVersion++;
+            PendingBoxes.Clear(); ZonesRead.Clear(); Version++; HazardVersion++; RockVersion++;
         }
 
         internal static void ApplySharedShips()
@@ -206,6 +210,7 @@ namespace ValheimNavigator
                 _manager = manager; Kinds.Clear(); Marks.Clear(); Obstacles.Clear(); _last = -1000f; _warned = false;
             }
             if (!route && Time.unscaledTime - _last < Settings.KnownRefresh.Value) return;
+            Navigator.LoadRemembered();
             _sectors = Sectors(manager); _sector = 0; _item = 0; Pending.Clear(); PendingShips.Clear(); PendingBoxes.Clear(); ZonesRead.Clear();
             Problem = null;
             _busy = _sectors != null; _last = Time.unscaledTime; _scanFrames = 0; _scanMilliseconds = 0;
@@ -239,12 +244,13 @@ namespace ValheimNavigator
                     if (!Obstacles.TryGetValue(key, out var list)) { list = new List<KnownMark>(); Obstacles.Add(key, list); }
                     list.Add(mark);
                 }
-                if (signature != _hazardSignature) { _hazardSignature = signature; HazardVersion++; }
+                if (signature != _hazardSignature) { _hazardSignature = signature; HazardVersion++; RockVersion++; }
                 Ships.Clear(); Ships.AddRange(PendingShips); PendingShips.Clear(); ApplySharedShips();
                 if (Settings.LoadedTerrain.Value && ZonesRead.Count > 0)
                 {
                     int boxes = PendingBoxes.Count;
-                    foreach (var box in PendingBoxes) unchecked { boxes = boxes * 31 + box.X.GetHashCode() ^ box.Z.GetHashCode() * 7 ^ box.Top.GetHashCode(); }
+                    // a sum, so the order the game lists its objects in does not count
+                    foreach (var box in PendingBoxes) unchecked { boxes += ((box.X.GetHashCode() * 397 ^ box.Z.GetHashCode()) * 31 + box.Top.GetHashCode()) * 7 + box.Walk; }
                     Remembered.ReplaceBoxesLater(ZonesRead, PendingBoxes);
                     // a changed set of solids is a new world for the kept route, as changed sea hazards are
                     if (boxes != _boxSignature) { _boxSignature = boxes; HazardVersion++; BoxesChanged = true; }
@@ -298,6 +304,7 @@ namespace ValheimNavigator
                 }
                 kind.Top = float.MinValue;
                 kind.Solid = prefab != null && SolidKind(prefab) && LocalBox(prefab, out kind.Min, out kind.Max, out kind.Top);
+                if (kind.Solid) { WalkKind(prefab, kind); TrunkOnly(prefab, kind); }
                 if (kind.Hazard && prefab != null)
                     foreach (var renderer in prefab.GetComponentsInChildren<Renderer>(true))
                     {
@@ -361,6 +368,38 @@ namespace ValheimNavigator
                 && prefab.GetComponent<Vagon>() == null && prefab.GetComponentInChildren<Door>(true) == null && prefab.GetComponent<Pickable>() == null;
         }
 
+        // a building piece the route walks on: stairs, ladders and ramps by name, and flat pieces (floors, bridge decks, docks) at most
+        // FloorThick high and at least FloorWide on both sides. roofs of that shape (26 degrees, a bridge or a ramp made of roofs) are
+        // walked at their middle height. other roof pieces (ridges, roof walls, steep roofs) are not walked and not walls, a roof bridge
+        // has them on its deck
+        private const float FloorThick = 1.2f, FloorWide = 0.9f;
+
+        private static void WalkKind(GameObject prefab, Kind kind)
+        {
+            var piece = prefab.GetComponent<Piece>();
+            if (piece == null || !piece.m_category.ToString().StartsWith("Building", StringComparison.Ordinal)) return;
+            string name = prefab.name.ToLowerInvariant();
+            var size = kind.Max - kind.Min;
+            bool flat = size.y <= FloorThick && size.x >= FloorWide && size.z >= FloorWide;
+            if (name.Contains("roof")) kind.Walk = flat ? Remembered.Roof : Remembered.Open;
+            else if (name.Contains("stair") || name.Contains("ladder") || name.Contains("ramp")) kind.Walk = Remembered.Stair;
+            else if (flat) kind.Walk = Remembered.Floor;
+            else return;
+            var wear = prefab.GetComponent<WearNTear>();
+            kind.Ground = (byte)(wear != null ? SpeedyPaths.FromMaterial((int)wear.m_materialType) : SpeedyPaths.Untamed);
+        }
+
+        // a standing tree's one mesh collider often holds its crown too, its box was then as wide as the crown and closed the forest (lab of
+        // 1 Nov: Black Forest trees 15 to 35 m wide around the user's home made 88 percent of the steps through solids). it is cut to the trunk
+        // around the tree's origin, TrunkHalf on each side before its scale
+        private const float TrunkHalf = 0.75f;
+
+        private static void TrunkOnly(GameObject prefab, Kind kind)
+        {
+            if (prefab.GetComponent<TreeBase>() == null || kind.Min.x > -TrunkHalf || kind.Max.x < TrunkHalf || kind.Min.z > -TrunkHalf || kind.Max.z < TrunkHalf) return;
+            kind.Min.x = -TrunkHalf; kind.Max.x = TrunkHalf; kind.Min.z = -TrunkHalf; kind.Max.z = TrunkHalf;
+        }
+
         // the box around a prefab's solid colliders in its own frame, from each collider's shape so inactive prefabs work too
         private static bool LocalBox(GameObject prefab, out Vector3 min, out Vector3 max, out float top)
         {
@@ -415,7 +454,7 @@ namespace ValheimNavigator
             float length = Mathf.Sqrt(axis.x * axis.x + axis.z * axis.z);
             if (length < 0.01f) { axis = Vector3.right; length = 1f; }
             return new Remembered.Box { X = center.x, Z = center.z, Cos = axis.x / length, Sin = axis.z / length, HalfX = half.x, HalfZ = half.z,
-                Bottom = center.y - half.y, Top = center.y + half.y, Zone = zone };
+                Bottom = center.y - half.y, Top = center.y + half.y, Zone = zone, Walk = kind.Walk, Ground = kind.Ground };
         }
 
         // 0 untouched, 1 partly mined, 2 fully mined. MineRock5 keeps a base64 list of area healths under s_health,

@@ -671,6 +671,8 @@ namespace ValheimNavigator
             if (a.Mode == 1 && b.Mode == 1) return new Color32(46, 92, 168, 245);
             if (b.Mode == 2) return new Color32(170, 120, 210, 110); // a portal jump, drawn faint
             if (a.Surface == NavSurface.Water || b.Surface == NavSurface.Water) return new Color32(93, 153, 179, 245);
+            // over a measured rock: red, rough ground
+            if (a.Source == RouteStore.RockSource || b.Source == RouteStore.RockSource) return new Color32(205, 45, 40, 245);
             float degrees = Mathf.Atan2(Math.Abs(b.Height - a.Height), NavSearch.Distance(a.X, a.Z, b.X, b.Z)) * Mathf.Rad2Deg;
             return Color.Lerp(new Color32(139, 174, 112, 245), new Color32(187, 103, 78, 245), Mathf.Clamp01(degrees / Settings.MaxSlope.Value));
         }

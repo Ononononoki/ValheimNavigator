@@ -10,7 +10,8 @@ Two mods in one: an interactive world map and a navigator. The large map and the
 - **Buildings** players placed, top down in the colors of their material. Or none, or every structure in the world.
 - **Find**: search every location type by name (bosses, traders, dungeons, caves, ore, runestones and more). The nearest gets a pin, places you reached are marked done.
 - **Layers**: turn categories and single location types on or off. Each category shows its nearest places, crowded views group them into numbered circles.
-- **Routes** on a route map of the whole world at 2 m: Shortest (the fastest walkable way) or Comfort (less climbing, away from harder biomes). On foot, by your nearest ship or a boat built at the best shore, through your portal pairs, with the predicted wind. To the Ashlands by drakkar, around the sea rocks and shallows your ship would hit. The route follows you and recalculates when you leave it.
+- **Routes** on a route map of the whole world at 2 m: Shortest (the fastest walkable way) or Comfort (less climbing, away from harder biomes). On foot, by your nearest ship or a boat built at the best shore, through your portal pairs, with the predicted wind. To the Ashlands by drakkar, around the sea rocks and shallows your ship would hit, never through burning lava. The route follows you as a plan: off it, it rejoins quickly, and a check every minute looks for a faster way.
+- **Detailed routes** read the real ground near you: your floors, bridges, docks and stairs are walked, paths and floors are faster, walls, trees and rocks are avoided. In the Ashlands the rocks near you are measured and routes cross lava over them (drawn red). They are measured again when rocks are destroyed.
 - **Tombs**: every player's tombstone in the world, searchable by name, with a route to it.
 - **Two map modes**: Explorer shows only what you explored and what lies close to it, Cartographer knows the whole world.
 - **Multiplayer**: the host shares the world's locations, portals, ships and its map data (terraforming, buildings, tombstones) with guests who run Navigator.
@@ -52,7 +53,7 @@ The 2 m map and the route map are built in the background the first time a world
 
 ## Planned
 
-- Faster routes in worlds with many portals, and on long trips to the Ashlands.
+- Ways across narrow lava streams (a jump, or bombs that cool the lava) where no other way exists.
 - A smoother large map, without short hitches when it opens or moves.
 - Faster Detailed routes, and routes between the floors of buildings.
 - Simpler, clearer menus.

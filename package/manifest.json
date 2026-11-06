@@ -1,8 +1,8 @@
 {
   "name": "ValheimNavigator",
-  "version_number": "0.2.1",
+  "version_number": "0.2.2",
   "website_url": "https://github.com/Ononononoki/ValheimNavigator",
-  "description": "Beta. Interactive world map and navigator: detailed 2 m map views with player buildings on the map and minimap, search for every location, fast routes on foot, by ship and through portals, tombstones of all players. Guests get the host's map data.",
+  "description": "Beta. Interactive world map and navigator: detailed 2 m map views with player buildings, search for every location, routes on foot, by ship and through portals that follow you and avoid lava, tombstones of all players. Guests share the host's map.",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2351"
   ]

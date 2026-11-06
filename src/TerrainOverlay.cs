@@ -38,15 +38,15 @@ namespace ValheimNavigator
 
         internal static void Dirty() { _dirty = true; DetailOverlay.Dirty(); }
 
-        // the game's lava value on ground (its map mask blue) as drawn: with LavaEdge only where it burns, over 0.6 like the game's own lava
-        // check and the routes, with a soft edge of a few hundredths. without it as the game draws it
-        internal const float LavaBurns = 0.6f, LavaSoft = 0.06f;
+        // the game's lava value on ground (its map mask blue) as drawn: with LavaEdge only where it heats you (NavSearch.LavaHeat, the edge
+        // routes keep away from), with a soft edge of a few hundredths. without it as the game draws it
+        internal const float LavaBurns = NavSearch.LavaHeat, LavaSoft = 0.06f;
         internal static float LavaDrawn(float lava) => Mathf.Clamp01((lava - LavaBurns) / LavaSoft + 0.5f);
 
         internal static string Key()
         {
             return Settings.OverlayView + "/" + Settings.Contours.Value + "/" + Settings.Mist.Value + "/" + Settings.Shallows.Value + "/" + Settings.Steepness.Value
-                + "/" + Settings.UnexploredShown + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.ContourAuto.Value + "/" + Settings.MaxSlope.Value + "/" + SharedDrawn + "/" + Settings.LavaEdge.Value;
+                + "/" + Settings.UnexploredShown + "/" + Settings.ContourMeters.Value + "/" + Settings.BoatDangerDepth.Value + "/" + Settings.BoatWarningDepth.Value + "/" + Settings.AshlandsHeat.Value + "/" + Settings.ContourAuto.Value + "/" + Settings.MaxSlope.Value + "/" + SharedDrawn + "/" + Settings.LavaEdge.Value + "/" + LavaBurns;
         }
 
         // the settings the full picture depends on. the explored state (map mode, Show unexplored, cartography land) and the mist are applied

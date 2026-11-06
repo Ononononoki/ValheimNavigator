@@ -64,6 +64,15 @@ namespace ValheimNavigator
         internal static string Status { get; private set; }
         internal static float Progress { get; private set; } = -1f;
         internal static ZoneGraph.Rules Rules => _rules;
+        // zones built again for changed ground since the route map started, a follow checks its plan when it moves
+        internal static int Repaired => _repaired;
+
+        // whether a walking step between two route map points can be taken on the ground as it is now (lava, slope, solids of the map)
+        internal static bool StepOpen(NavPoint a, NavPoint b)
+        {
+            var rules = _rules;
+            return rules == null || !float.IsInfinity(rules.Shortest.StepSeconds(a, b, NavSearch.Distance(a.X, a.Z, b.X, b.Z), 0, false));
+        }
         internal static bool Running => _world != null;
 
         // every frame on the game's thread: start and stop with the world, follow the player
@@ -81,8 +90,13 @@ namespace ValheimNavigator
             // without the detailed terrain map nothing else reads the terraforming and the location shaping, the routes need both
             _ownTerrain = FineTerrain.Folder == null;
             if (_ownTerrain) { TerrainEdits.Tick(); LocationShaping.Tick(); }
+            if (Time.unscaledTime >= _nextPaths) { _nextPaths = Time.unscaledTime + PathSeconds; ReadPathSpeeds(); }
             if (Time.unscaledTime >= _nextStatus) { _nextStatus = Time.unscaledTime + StatusSeconds; UpdateStatus(); }
         }
+
+        // the SpeedyPaths speeds are read again this often, a change builds the zones with walked pieces or paint again
+        private const float PathSeconds = 10f;
+        private static float _nextPaths;
 
         // the walking and sailing rules the zones are built with, from the settings
         internal static NavOptions Options(bool comfort)
@@ -100,7 +114,7 @@ namespace ValheimNavigator
         private static string RulesKey()
         {
             var o = Options(false);
-            return string.Join(" ", new[] { o.MaxSlope, o.JumpSlope, o.JumpMeters, o.WalkSpeed, o.SwimSpeed, o.SwimRisk, o.WadeDepth, o.MaxSwim, o.SailSpeed, o.ShipDraft, o.SlopePenalty, o.WaterLevel }
+            return string.Join(" ", new[] { o.MaxSlope, o.JumpSlope, o.JumpMeters, o.WalkSpeed, o.SwimSpeed, o.SwimRisk, o.WadeDepth, o.MaxSwim, o.SailSpeed, o.ShipDraft, o.SlopePenalty, o.WaterLevel, o.BoilingPenalty, NavSearch.LavaHeat, 0f }
                 .Select(v => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
         }
 
@@ -110,6 +124,7 @@ namespace ValheimNavigator
             _threads = Math.Max(1, Settings.FineThreads.Value);
             _rulesKey = rulesKey;
             _water = ZoneSystem.instance.m_waterLevel;
+            ReadPathSpeeds(); _nextPaths = Time.unscaledTime + PathSeconds;
             var shortest = Options(false); var comfort = Options(true);
             _rules = new ZoneGraph.Rules { Shortest = new NavTerrain(Point, shortest), Comfort = new NavTerrain(Point, comfort), Water = _water, Draft = shortest.ShipDraft, MaxSwim = shortest.MaxSwim, Wade = shortest.WadeDepth };
             _opened = false;
@@ -157,6 +172,11 @@ namespace ValheimNavigator
         private static int TileOf(int zone) => FineBuilder.FloorDiv(zone, TileZones);
         private static long Key(int zx, int zz) => TerrainEdits.Key(zx, zz);
 
+        // walking over a measured rock: rough and slow, so a route goes over a rock only where the way around is long or lava (the user,
+        // 6 Nov: rocks are tough terrain, drawn red). its points carry RockSource
+        internal const float RockSpeed = 0.5f;
+        internal const byte RockSource = 3;
+
         // the ground point the zones and the routes read (x and z even meters), any thread
         internal static NavPoint Sample(int x, int z)
         {
@@ -166,7 +186,37 @@ namespace ValheimNavigator
             if (biome == Heightmap.Biome.AshLands) { world.GetBiomeHeight(biome, x, z, out Color mask, false, true); lava = mask.a; }
             float height = RouteGround.Height(world, x, z);
             var surface = NavSearch.Classify(height, _water, biome == Heightmap.Biome.AshLands, lava, WorldGenerator.GetAshlandsOceanGradient(x, z));
-            return new NavPoint { X = x, Z = z, Height = height, Surface = surface, Rank = (byte)Navigator.Rank(biome) };
+            // Detailed: your floors, bridges, docks and stairs are walked on, at the SpeedyPaths speed of their material, and painted paths
+            // at theirs
+            float speed = 0f;
+            int ground;
+            byte source = 0;
+            if (Remembered.Surface(x, z, Math.Max(height, _water), height < _water, out float top, out ground)) { height = top; surface = NavSurface.Land; speed = PathSpeed(ground); }
+            // a measured Ashlands rock is stood on, over lava too, as rough ground (RockSpeed), its points marked for the red line
+            else if (Remembered.RockTop(x, z, out float rock) && rock > Math.Max(height, _water)) { height = rock; surface = NavSurface.Land; speed = RockSpeed; source = RockSource; }
+            else if (Remembered.Ground(x, z, out _, out ground) && height >= _water) speed = PathSpeed(ground);
+            return new NavPoint { X = x, Z = z, Height = height, Surface = surface, Rank = (byte)Navigator.Rank(biome), Speed = speed, Source = source };
+        }
+
+        // the SpeedyPaths speeds the route map was asked for (read on the game's thread), 0 where a ground type is not faster
+        private static volatile float[] _pathSpeeds = new float[0];
+        private static ulong _pathKey;
+        // the fastest path speed in the route map, for bounds on foot
+        internal static float TopPathSpeed { get { float t = 1f; foreach (float s in _pathSpeeds) t = Math.Max(t, s); return t; } }
+        private static float PathSpeed(int ground) { var s = _pathSpeeds; return ground > 0 && ground < s.Length && s[ground] != 1f ? s[ground] : 0f; }
+
+        private static void ReadPathSpeeds()
+        {
+            var speeds = new float[0];
+            // in both route details: the route map is one for both, a speed only in Detailed rebuilt every zone with paths or pieces on a switch
+            if (Settings.SpeedyPaths.Value && SpeedyPaths.Read(out _))
+            {
+                speeds = new float[SpeedyPaths.Grausten + 1];
+                for (int i = 0; i < speeds.Length; i++) speeds[i] = SpeedyPaths.Of(i);
+            }
+            ulong key = 1469598103934665603UL;
+            foreach (float s in speeds) key = Mix(key, (ulong)BitConverter.DoubleToInt64Bits(s));
+            _pathSpeeds = speeds; _pathKey = key;
         }
 
         private static NavPoint Point(float x, float z) => Sample(Mathf.RoundToInt(x), Mathf.RoundToInt(z));
@@ -419,11 +469,13 @@ namespace ValheimNavigator
 
         // ---- changed ground ----
 
-        // the zone's own ground data: its terraforming and visited ground, and the location modifiers reaching it, 0 for none
+        // the zone's own ground data: its terraforming and visited ground, the location modifiers reaching it, and its walked pieces and paint
+        // with the path speeds, 0 for none
         private static ulong OwnHash(int zx, int zz)
         {
-            ulong a = TerrainEdits.ZoneHash(zx, zz), b = LocationShaping.ZoneHash(zx, zz);
-            return a == 0UL && b == 0UL ? 0UL : Mix(Mix(1469598103934665603UL, a), b);
+            ulong a = TerrainEdits.ZoneHash(zx, zz), b = LocationShaping.ZoneHash(zx, zz), c = Remembered.WalkHash(zx, zz);
+            if (c != 0UL) c = Mix(c, _pathKey);
+            return a == 0UL && b == 0UL && c == 0UL ? 0UL : Mix(Mix(Mix(1469598103934665603UL, a), b), c);
         }
 
         private static ulong Mix(ulong h, ulong v) { unchecked { for (int i = 0; i < 8; i++) { h = (h ^ (v & 0xFF)) * 1099511628211UL; v >>= 8; } } return h; }
@@ -458,18 +510,20 @@ namespace ValheimNavigator
         // hashed, a changed one and its neighbours are compared with their built signature, and the ones that differ are built again
         private static void Check(int generation)
         {
-            int editVersion = int.MinValue; ulong shaping = ulong.MaxValue;
+            int editVersion = int.MinValue, remembered = int.MinValue; ulong shaping = ulong.MaxValue, paths = 0UL;
             var full = System.Diagnostics.Stopwatch.StartNew();
             while (generation == _generation)
             {
                 Thread.Sleep((int)(CheckSeconds * 1000f));
                 if (generation != _generation) return;
-                if (TerrainEdits.Version == editVersion && LocationShaping.Signature == shaping && full.Elapsed.TotalSeconds < FullCheckSeconds && Pending.Count == 0) continue;
-                editVersion = TerrainEdits.Version; shaping = LocationShaping.Signature; full.Reset(); full.Start();
+                if (TerrainEdits.Version == editVersion && LocationShaping.Signature == shaping && Remembered.Version == remembered && _pathKey == paths
+                    && full.Elapsed.TotalSeconds < FullCheckSeconds && Pending.Count == 0) continue;
+                editVersion = TerrainEdits.Version; shaping = LocationShaping.Signature; remembered = Remembered.Version; paths = _pathKey; full.Reset(); full.Start();
                 try
                 {
                     var keys = new HashSet<long>(TerrainEdits.DataKeys());
                     keys.UnionWith(LocationShaping.ShapedKeys());
+                    keys.UnionWith(Remembered.WalkKeys());
                     var changed = new List<long>();
                     lock (Gate) foreach (long key in Own.Keys) if (!keys.Contains(key)) changed.Add(key);
                     foreach (long key in keys)

@@ -1,43 +1,49 @@
 # Changelog
 
+## 0.2.2
+
+- Routes are found much faster, through portals 3 to 4 times faster.
+- A route you follow is kept as the plan. Step off it and it rejoins quickly, take its portal and it goes on, a check every minute looks for a faster way.
+- After a teleport off the route, the new route uses all your portals again.
+- Detailed routes walk your floors, bridges, docks and stairs, go faster on paths and floors, and find the way around walls near the start and the goal.
+- Lava is closed wherever it burns. In the Ashlands the rocks near you are measured, routes can cross lava over them (drawn red), and the route updates when they appear or are destroyed.
+- The route map is built again once after the update (a few minutes).
+
 ## 0.2.1
 
-- No more game freezes when you pick a new place or change a route switch while a route is being calculated. The old search is stopped and the game no longer waits for it.
-- Routes at sea: aboard a ship, or swimming far from any shore, the route starts sailing from where you are. Swimming near a shore without a ship close by, it stays a swim. Fixed routes that failed at sea, planned from a ship far away, or kept the route map off after a failure.
-- A ship's draft and width are measured once it floats near you. Routes sail around known sea rocks, shallows and gaps that ship would hit. Ships from other mods count as a longship until measured, and the route says so.
-- Sailing no longer cuts across small spits of land near a landing.
-- A start on a rock, on lava or inside a building moves to the nearest open spot. Near the start and the goal, steep ground is avoided again, except in the first and last 4 m.
-- When no way keeps clear of known rocks, trees, walls and harder biomes, they are left out and the route says so, so a route is found far more often.
-- While you follow a route, a new search replaces it only when it is clearly faster, so the line no longer flips between two equal ways.
-- The route follows you every 5 s by default (was 1 s), set once for everyone. Under 5 s the panel says it may slow the game.
-- Long Ashlands trips need far fewer search steps.
+- Fixed game freezes when you pick a new place while a route is still being found.
+- Fixed routes at sea. On a ship, or far out at sea, the route sails from where you are.
+- Routes keep clear of known sea rocks, shallows and gaps too narrow for your ship. A ship's size is measured once it floats near you.
+- Sailing no longer cuts across small spits of land.
+- A start on a rock, on lava or inside a building moves to the nearest open spot. Steep ground near the start and the goal is avoided again.
+- A route is found far more often. When no way avoids rocks, trees, walls or harder biomes, the route says so.
+- A route you follow no longer flips between two equally fast ways.
+- The route updates every 5 s by default (was 1 s).
+- Long trips to the Ashlands are found faster.
 - Detailed routes avoid remembered trees, rocks and walls along the whole way.
-- Comfort prices harder biomes by how much of a zone they cover, and walks around swamp water. Shortest still wades.
+- Comfort walks around swamp water, and avoids harder biomes by how much of them it would cross.
 - More boats allows up to three boats on one trip.
-- New Map view row "Lava where it burns" (`LavaEdge`), on by default: lava is drawn where it burns, with a soft edge.
+- Lava is drawn where it burns, with a soft edge (`LavaEdge`).
 - Tombs show how long ago each player died.
-- The large map opens more smoothly.
-- The route map builds faster while the game is paused or a menu is open. A dug spot updates its routes after 20 s without changes.
-- Dedicated servers also share terraforming and location ground (not tested yet).
-- Settings of the old route search left the cfg, they are fixed at their defaults.
+- The large map opens more smoothly, and the route map builds faster while the game is paused.
+- Dedicated servers share terraforming and location ground too (not tested yet).
+- Old route search settings were removed from the config.
 - The route map is built again once after the update (a few minutes).
 
 ## 0.2.0
 
-- Detailed map view on the large map and the minimap: the game's own map look drawn from a 2 m terrain map of the world, built in the background and kept on disk, at every zoom. It shows your terraforming, the ground the game shapes around its locations, and your paths, fields and paved ground in the game's own ground textures. The real ground of places you visit is kept too.
-- The panel's bottom line shows the build progress of the detailed map and the route map. `DetailedTerrain = false` turns the detailed map off, and the line then says so.
-- Buildings on the large map and the minimap: the buildings players placed by default, top down in the colors of their material, the highest layer only. The Buildings switch also shows none or every structure in the world.
-- Routes, in Fast and Detailed, are planned on a new route map of the whole world at 2 m, built in the background and kept on disk, and built again where the ground changes. A route of several kilometers usually takes under a second, follows the ground more closely and is drawn with the look of the ground it crosses. The older search stays as the fallback until the route map covers a route.
-- Shortest is always the fastest walkable way, running and jump-running included. Harder biomes are avoided only in Comfort.
-- Sailing long ways across the sea, with the wind on every leg, and a second boat with More boats.
-- To the Ashlands the boat is a drakkar: your nearest ship that can sail the boiling sea, or one built at the shore. Lava is judged like the game judges it. Routes to the Ashlands always come from the route map, which walks around the lava at 2 m. While it is still being built there, the Route page says how many tiles are left.
-- Tombstones tab: every player's tombstone in the world, searchable by name, nearest first, with a route to the one you pick.
-- In multiplayer the host also shares the map data of the whole world with guests: terraforming, paths and fields, player buildings, location ground and tombstones (`ShareMap`).
-- Panel texts get smaller instead of being cut off, and each tab is as wide as its title.
-- The pin limit (`MaxPins`, pins per category) now also holds for the numbered circles: zoomed out, each category shows only its nearest places to you, so the map is not crowded.
-- The minimap buildings layer slides with you instead of being drawn again.
-- With LivingMap installed, the panel says that Navigator's map views cover LivingMap's bases and roads (`LivingMapMode` keeps LivingMap's close-up view on top).
-- New defaults: the detailed map view, place names next to pins when zoomed in, and tombstones on the map. Coming from 0.1.x, a map view left at the old default (the game's map) moves to the detailed view once, and any view picked after that stays.
+- New detailed map view on the large map and the minimap, drawn from a 2 m map of the world in the game's own look. It shows terraforming, paths, fields and paved ground. It is built in the background, with its progress on the panel (`DetailedTerrain` turns it off).
+- Player buildings on the map and the minimap, seen from above in the colors of their material (Buildings: none, yours or all).
+- New route map of the whole world at 2 m. A route of several kilometers usually takes under a second and follows the ground closely.
+- Shortest is always the fastest walkable way. Only Comfort avoids harder biomes.
+- Long sea trips use the wind on every leg, and More boats allows a second boat.
+- Routes to the Ashlands use a drakkar, your own or one built at the shore, and walk around the lava.
+- New Tombstones tab: every player's tombstone, searchable, with a route to it.
+- In multiplayer the host shares the whole map data with guests (`ShareMap`).
+- Panel texts shrink instead of being cut off.
+- `MaxPins` also limits the numbered circles, so a zoomed out map is not crowded.
+- With LivingMap installed, the panel explains how both maps work together (`LivingMapMode`).
+- New defaults: the detailed map view, place names next to pins, and tombstones on the map.
 
 ## 0.1.2
 

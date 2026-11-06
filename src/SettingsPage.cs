@@ -81,7 +81,7 @@ namespace ValheimNavigator
             Add(Ui.Cycle(page, "WarningDepth", "Yellow below depth", 0f, 0f, w, Settings.BoatWarningDepth, new[] { 2f, 3f, 4f, 5f }, " m", Panel.LayersChanged));
             Add(Ui.Toggle(page, "SeaHazards", "Known sea rocks and ice", 0f, 0f, w, Settings.SeaHazards, ObjectsChanged));
             Add(Ui.Toggle(page, "AshlandsHeat", "Boiling sea and lava", 0f, 0f, w, Settings.AshlandsHeat, Panel.LayersChanged));
-            Add(Ui.Toggle(page, "LavaEdge", "Lava where it burns", 0f, 0f, w, Settings.LavaEdge, Panel.LayersChanged));
+            Add(Ui.Toggle(page, "LavaEdge", "Lava where it heats you", 0f, 0f, w, Settings.LavaEdge, Panel.LayersChanged));
             Section(page, "Known world objects");
             Add(Ui.Toggle(page, "Ore", "Known ore deposits", 0f, 0f, w, Settings.Ore, ObjectsChanged));
             // the ore types open like a dropdown under their own row

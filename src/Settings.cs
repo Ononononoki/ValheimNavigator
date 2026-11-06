@@ -203,7 +203,7 @@ namespace ValheimNavigator
             Shallows = config.Bind(Sections.MapView, "Shallows", false, "Mark shallow water red below DangerDepth and yellow below WarningDepth. Uses the 2 m terrain where it is built, the base terrain elsewhere, not waves or constructed obstacles.");
             Steepness = config.Bind(Sections.MapView, "Steepness", false, "Shade steep terrain light or dark violet using the map height texture.");
             AshlandsHeat = config.Bind(Sections.MapView, "AshlandsHeat", true, "Tint boiling Ashlands water magenta and lava orange, inside the world's edge only.");
-            LavaEdge = config.Bind(Sections.MapView, "LavaEdge", true, "Draw lava only where it burns (the game's own lava value 0.6, the edge routes keep to). Off draws the game's wider lava look, which reaches past the burning lava.");
+            LavaEdge = config.Bind(Sections.MapView, "LavaEdge", true, "Draw lava where it heats and burns you (the game's lava value about 0.22, the edge routes keep away from). Off draws the game's own lava look.");
             BoatDangerDepth = Number(config, Sections.MapView, "DangerDepth", 1.5f, 0.2f, 10f, "Depth in meters below which shallow water is red.");
             BoatWarningDepth = Number(config, Sections.MapView, "WarningDepth", 3f, 0.5f, 15f, "Depth in meters below which shallow water is yellow.");
             CellMeters = new Fixed<float>(24f);

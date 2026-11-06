@@ -36,14 +36,19 @@ namespace ValheimNavigator
             internal Func<bool> Stop;
             // a known sea rock or ice at a point (the ship keeps clear), and a solid between two points on foot (Detailed: remembered walls,
             // rocks and trees). checked in the searches inside the zones and the straightening, so the route goes around them. SolidsVersion
-            // changes when either changes, the kept portal searches follow it
+            // changes with the sea rocks and AreaSolids with the solids, the kept portal searches follow both
             internal Func<float, float, bool> Rock;
             // the keel of this route's ship (ShipHulls): offshore water shallower than it (and a margin) is closed like a rock, 0 for none
             internal float ShipDraft;
             // the beam of this route's ship: a gap between land or rocks narrower than it (and a margin) is closed, 0 for none
             internal float ShipBeam;
             internal Func<NavPoint, NavPoint, bool> Crosses;
+            // a step through a solid costs WallSeconds more instead of closing (0 closes it): the route goes around walls through gates and
+            // doors when that is shorter, and through the fewest walls when no way in is known
+            internal float WallSeconds;
             internal int SolidsVersion;
+            // the remembered solids of a zone as a hash (Remembered.ZoneHash), so a portal end's search is kept while the solids around it stay
+            internal Func<int, int, int> AreaSolids;
             // Comfort's harder biomes, point by point in the searches inside the zones: a step onto a point ranked above DangerRank costs
             // DangerPenalty times as much (+infinity keeps out). the zone graph takes FootFactor per zone, spots near start, goal and portals are
             // walked as they are
@@ -63,10 +68,16 @@ namespace ValheimNavigator
             internal int PlainHops;
             // found only with rocks, solids and the danger rule left out
             internal bool Plain;
+            // steps of the route through a remembered solid (WallSeconds), their extra time is not in Seconds
+            internal int Walls;
             // searches again with zones priced for their rocks and solids
             internal int Repairs;
+            // the search's own time of the route on the zone graph, before it is refined and priced (the lab compares them)
+            internal float Graph;
             // nodes expanded in each phase (on foot, sailing, on foot after landing, the second boat, on foot after it)
             internal readonly int[] PhaseExpanded = new int[Phases];
+            // the query's parts in ms and the portal end searches kept or made, over all rounds (for the logs)
+            internal string Parts;
             // the route, mode 0 on foot, 1 sailing, 2 the landing of a portal jump
             internal List<NavPoint> Points = new List<NavPoint>();
         }
@@ -251,9 +262,36 @@ namespace ValheimNavigator
                     return Blocked(a) || Blocked(b) ? float.PositiveInfinity : d / _rules.Shortest.Options.WalkSpeed;
                 if (da <= _q.OpenMeters * _q.OpenMeters || db <= _q.OpenMeters * _q.OpenMeters) open = true;
             }
-            if (!open && _q.Crosses != null && !_plain && !_allPlain && _q.Crosses(a, b)) return float.PositiveInfinity;
+            float wall = 0f;
+            if (!open && _q.Crosses != null && !_plain && !_allPlain && _q.Crosses(a, b))
+            {
+                if (_q.WallSeconds <= 0f) return float.PositiveInfinity;
+                wall = _q.WallSeconds;
+                if (_countWalls) _walls++;
+            }
             float seconds = (comfort ? _rules.Comfort : _rules.Shortest).StepSeconds(a, b, d, 0, false);
-            return !open && b.Rank > _q.DangerRank && !_plain && !_allPlain ? seconds * _q.DangerPenalty : seconds;
+            return (!open && b.Rank > _q.DangerRank && !_plain && !_allPlain ? seconds * _q.DangerPenalty : seconds) + wall;
+        }
+
+        // the steps through a solid counted while the final route is priced
+        private bool _countWalls;
+        private int _walls;
+
+        // a step through a solid that costs WallSeconds (away from the open spots): a hop or border step with one marks its zones, they are
+        // priced again with the walls, so the zone graph looks for a gate or a door
+        private bool WallStep(NavPoint a, NavPoint b)
+        {
+            if (_q.WallSeconds <= 0f || _q.Crosses == null || _plain || _allPlain) return false;
+            foreach (var (x, z) in _open)
+                if ((a.X - x) * (a.X - x) + (a.Z - z) * (a.Z - z) <= _q.OpenMeters * _q.OpenMeters || (b.X - x) * (b.X - x) + (b.Z - z) * (b.Z - z) <= _q.OpenMeters * _q.OpenMeters) return false;
+            return _q.Crosses(a, b);
+        }
+
+        private bool WallIn(Local l, List<int> cells)
+        {
+            for (int i = 1; i < cells.Count; i++)
+                if (WallStep(PointAt(l.X(cells[i - 1]), l.Z(cells[i - 1])), PointAt(l.X(cells[i]), l.Z(cells[i])))) return true;
+            return false;
         }
 
         private static bool Blocked(NavPoint p) => p.Surface == NavSurface.Obstacle || p.Surface == NavSurface.Lava || float.IsNaN(p.Height);
@@ -274,13 +312,15 @@ namespace ValheimNavigator
         }
 
         // reach 1: the zone and its eight neighbours, 0: the zone alone. target: a point of the zone (zx, zz) to stop at
-        private Local Search(int zx, int zz, int reach, int from, int layer, bool reverse, int target = -1)
+        private Local Search(int zx, int zz, int reach, int from, int layer, bool reverse, int target = -1, bool portalsOnly = false)
         {
             var l = new Local { Bzx = zx - reach, Bzz = zz - reach, Span = 2 * reach + 1, Layer = layer, Reverse = reverse };
             // only the open spots near the block count for its steps
             float ox0 = ZoneGraph.OriginX(l.Bzx) - _q.OpenMeters, oz0 = ZoneGraph.OriginZ(l.Bzz) - _q.OpenMeters, ox1 = ZoneGraph.OriginX(l.Bzx + l.Span) + _q.OpenMeters, oz1 = ZoneGraph.OriginZ(l.Bzz + l.Span) + _q.OpenMeters;
             _near = new List<(float, float)>();
-            foreach (var (x, z) in _open) if (x >= ox0 && x <= ox1 && z >= oz0 && z <= oz1) _near.Add((x, z));
+            // portalsOnly: the portal ends' open spots alone (they follow the start and the goal in _open)
+            int firstOpen = portalsOnly ? 2 : 0, lastOpen = portalsOnly ? 2 + 2 * _q.Portals.Count : _open.Count;
+            for (int i = firstOpen; i < lastOpen; i++) { var (x, z) = _open[i]; if (x >= ox0 && x <= ox1 && z >= oz0 && z <= oz1) _near.Add((x, z)); }
             int n = l.N;
             l.Cost = new float[n * n]; l.Parent = new int[n * n];
             var points = new NavPoint[l.Span * l.Span][]; var graphs = new ZoneGraph[l.Span * l.Span];
@@ -325,6 +365,8 @@ namespace ValheimNavigator
         }
 
         private List<(float, float)> _near;
+        // portal end searches taken from _spotSearches or made in this query
+        private int _spotsKept, _spotsMade;
         // the start or the goal lies past the swim limit: the swim to it is priced, not refused
         private bool _outThere;
 
@@ -339,14 +381,18 @@ namespace ValheimNavigator
             {
                 for (int dz = -reach; dz <= reach; dz++)
                     for (int dx = -reach; dx <= reach; dx++) { var g = Zone(zx + dx, zz + dz); signature = (signature ^ (g != null ? g.Signature + 1UL : 0UL)) * 1099511628211UL; }
-                signature = (signature ^ (uint)_q.SolidsVersion ^ (_q.Rock != null ? 1UL << 40 : 0UL) ^ (_q.Crosses != null ? 1UL << 41 : 0UL)) * 1099511628211UL;
+                signature = (signature ^ (uint)_q.SolidsVersion ^ (_q.Rock != null ? 1UL << 40 : 0UL) ^ (_q.Crosses != null ? 1UL << 41 : 0UL) ^ (PortalSpotsApart ? 1UL << 42 : 0UL)) * 1099511628211UL;
+                if (_q.Crosses != null && _q.AreaSolids != null)
+                    for (int dz = -reach - 1; dz <= reach + 1; dz++)
+                        for (int dx = -reach - 1; dx <= reach + 1; dx++) signature = (signature ^ (uint)_q.AreaSolids(zx + dx, zz + dz)) * 1099511628211UL;
             }
             float span = (reach + 0.5f) * ZoneGraph.Meters + _q.OpenMeters * 2f;
             bool Near(float px, float pz) => Math.Abs(px - x) < span && Math.Abs(pz - z) < span;
-            bool clean = !Near(_q.StartX, _q.StartZ) && !Near(_q.GoalX, _q.GoalZ) && !(_q.HasShip && Near(_q.ShipX, _q.ShipZ));
+            bool clean = PortalSpotsApart || !Near(_q.StartX, _q.StartZ) && !Near(_q.GoalX, _q.GoalZ) && !(_q.HasShip && Near(_q.ShipX, _q.ShipZ));
             var key = (x, z, reverse, _q.Comfort);
-            if (clean && _spotSearches.TryGetValue(key, out var kept) && kept.signature == signature) return kept.local;
-            var l = Search(zx, zz, reach, local, 0, reverse);
+            if (clean && _spotSearches.TryGetValue(key, out var kept) && kept.signature == signature) { _spotsKept++; return kept.local; }
+            _spotsMade++;
+            var l = Search(zx, zz, reach, local, 0, reverse, -1, PortalSpotsApart);
             if (clean) { if (_spotSearches.Count >= SpotSearchCache) _spotSearches.Clear(); _spotSearches[key] = (signature, l); }
             return l;
         }
@@ -373,13 +419,18 @@ namespace ValheimNavigator
         // rocks and solids the zone graph does not know can close a hop: its zones are priced again with them and the route searched again,
         // a few rounds at most, then the closed hops are taken as the zone graph knows them
         private const int RepairRounds = 4;
+        // the zones around the start, the goal and the ship searched with all their solids, not through the zone graph. 2 (5 by 5 zones):
+        // the zone graph alone priced the castle's south gate and bridge with wall penalties a zone's own search could not walk around, and
+        // routes to the Burial Chambers took the west bridge, 96 s instead of 76 s (castle lab, 6 Nov)
+        internal static int SpotReach = 2;
         private readonly HashSet<long> _dirty = new HashSet<long>();
         private readonly Dictionary<long, ZoneGraph> _repriced = new Dictionary<long, ZoneGraph>();
         private bool _newDirty;
 
         internal Result Find(Request q)
         {
-            _dirty.Clear(); _repriced.Clear();
+            _dirty.Clear(); _repriced.Clear(); _hops.Clear();
+            SetupMs = SearchMs = RepriceMs = RefineMs = StraightenMs = 0; _spotsKept = _spotsMade = 0;
             // aboard is decided where you stand, before the start moves off a solid (the ship's own hull is one)
             _aboard = q.HasShip && (q.StartX - q.ShipX) * (q.StartX - q.ShipX) + (q.StartZ - q.ShipZ) * (q.StartZ - q.ShipZ) <= AboardMeters * AboardMeters;
             // a start on the open sea past the swim limit is on a ship (the game had not counted the player aboard yet)
@@ -390,6 +441,7 @@ namespace ValheimNavigator
             for (int round = 0; round <= RepairRounds; round++)
             {
                 _newDirty = false;
+                _lastRound = round == RepairRounds || !Closes(q);
                 result = FindOnce(q);
                 rounds = round;
                 if (!_newDirty || result.Stopped || !result.Reached || !Closes(q)) break;
@@ -397,11 +449,13 @@ namespace ValheimNavigator
             // no way with rocks, solids and the danger rule: once more without them, and the route says so
             if (!result.Reached && !result.Stopped && (Closes(q) || q.FootFactor != null))
             {
-                _dirty.Clear(); _repriced.Clear(); _allPlain = true;
+                _dirty.Clear(); _repriced.Clear(); _hops.Clear(); _allPlain = true; _lastRound = true;
                 try { var plain = FindOnce(q); if (plain.Reached || plain.Stopped) { plain.Plain = true; result = plain; } }
                 finally { _allPlain = false; }
             }
             result.Repairs = rounds;
+            result.Parts = "setup " + SetupMs.ToString("F0") + ", search " + SearchMs.ToString("F0") + ", reprice " + RepriceMs.ToString("F0") + ", refine " + (RefineMs - StraightenMs).ToString("F0")
+                + ", straighten " + StraightenMs.ToString("F0") + " ms, portal end searches " + _spotsKept + " kept and " + _spotsMade + " made";
             return result;
         }
 
@@ -418,6 +472,18 @@ namespace ValheimNavigator
         // the caller asked the search to stop (a new route, a switch): checked between the portal searches, zone repricings, hops and
         // straightening steps, so the main thread that waits for the stop is not held for seconds (test of 31 Oct: freezes of 0.9 to 4.9 s)
         private bool _halted;
+        // 0.2.2 speedups, on by default, the lab turns them off to compare: the portals' part of the bound once per zone (PortalBoundPerZone),
+        // hops refined in an earlier repair round reused (RefineCache), straightening only in the round that is kept (StraightenLast)
+        internal static bool PortalBoundPerZone = true, RefineCache = true, StraightenLast = true;
+        // portal ends are searched without the start's, goal's and ship's open spots, so their search is kept near the start too, a link
+        // between two spots takes the cheaper of their two searches (route method lab of 1 Nov: portal trips from home 1.7 to 2.3 times
+        // faster, the same routes)
+        internal static bool PortalSpotsApart = true;
+        private bool _lastRound;
+        private readonly Dictionary<(long, int, int, int), (float[] xz, bool plain, bool wall)> _hops = new Dictionary<(long, int, int, int), (float[], bool, bool)>();
+        // the time of each part of the last Find in ms, summed over its rounds (the lab reads them)
+        internal double SetupMs, SearchMs, RepriceMs, RefineMs, StraightenMs;
+        private static double Ms(long from) => (System.Diagnostics.Stopwatch.GetTimestamp() - from) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         private bool Halt()
         {
             if (!_halted && _q.Stop != null && _q.Stop()) _halted = true;
@@ -431,6 +497,7 @@ namespace ValheimNavigator
             long key = ZoneKey(zx, zz);
             if (!_dirty.Contains(key)) return g;
             if (_repriced.TryGetValue(key, out var r)) return r;
+            long repriceAt = System.Diagnostics.Stopwatch.GetTimestamp();
             var shortest = (float[])g.Shortest.Clone(); var comfort = (float[])g.Comfort.Clone();
             for (int k = 0; k < g.Cells.Length; k++)
             {
@@ -449,6 +516,7 @@ namespace ValheimNavigator
             }
             r = g.Repriced(shortest, comfort);
             _repriced[key] = r;
+            RepriceMs += Ms(repriceAt);
             return r;
         }
 
@@ -464,6 +532,7 @@ namespace ValheimNavigator
         private Result FindOnce(Request q)
         {
             _q = q; _halted = false;
+            long setupAt = System.Diagnostics.Stopwatch.GetTimestamp();
             _checked.Clear(); _zoneCache.Clear(); _rocks.Clear(); _plain = false;
             var result = new Result();
             SnapGoal(q);
@@ -479,18 +548,12 @@ namespace ValheimNavigator
                 spots[id] = s;
                 return s;
             }
-            // each spot is joined to the nodes of its zone and the eight around it (a spot near a zone border reaches across it)
-            const int reach = 1;
+            // each spot is joined to the nodes of its zone and the zones around it, SpotReach deep (a spot near a zone border reaches across it)
+            int reach = SpotReach;
             var start = Make(VStart, q.StartX, q.StartZ); start.Out = Search(start.Zx, start.Zz, reach, start.Local, 0, false);
             var goal = Make(VGoal, q.GoalX, q.GoalZ); goal.In = Search(goal.Zx, goal.Zz, reach, goal.Local, 0, true);
             _outThere = Zone(start.Zx, start.Zz)?.Blocked(start.Local) == true || Zone(goal.Zx, goal.Zz)?.Blocked(goal.Local) == true;
-            for (int i = 0; i < q.Portals.Count * 2; i++)
-            {
-                if (Halt()) { result.Stopped = true; return result; }
-                var p = q.Portals[i / 2];
-                var s = Make(VPortal + i, i % 2 == 0 ? p[0] : p[2], i % 2 == 0 ? p[1] : p[3]);
-                s.Out = SpotSearch(s.X, s.Z, s.Zx, s.Zz, s.Local, false); s.In = SpotSearch(s.X, s.Z, s.Zx, s.Zz, s.Local, true);
-            }
+            // the portal ends are searched later, when the search reaches a cost at which their pair could help (Activate)
             Spot shipFoot = null, shipSea = null;
             if (q.HasShip)
             {
@@ -543,10 +606,34 @@ namespace ValheimNavigator
             // a leg's bound: on foot the grid distance at the walking speed, with a boat the straight distance at the best progress toward
             // the point (the wind's best sailing speed only toward where it blows, the walking speed where that is faster)
             float Leg(float x, float z, float xx, float zz, bool sails) => sails ? (float)Math.Sqrt((x - xx) * (x - xx) + (z - zz) * (z - zz)) / Progress(xx - x, zz - z) : Straight(x, z, xx, zz, walk);
+            // the portals' part of the bound for a whole zone: from the zone's nearest point to a portal's entrance at the best speed, the jump,
+            // then the leg from its exit to the goal. a lower bound for every point of the zone, kept per zone and sailing flag
+            float topProgress = 0f;
+            if (boats) foreach (float v in _progress) topProgress = Math.Max(topProgress, v);
+            var portalBound = new Dictionary<long, float>();
+            float ZoneBound(int zx, int zz, bool sails)
+            {
+                long key = ZoneKey(zx, zz) * 2 + (sails ? 1 : 0);
+                if (portalBound.TryGetValue(key, out float kept)) return kept;
+                float x0 = zx * ZoneGraph.Meters - ZoneGraph.Meters / 2f, z0 = zz * ZoneGraph.Meters - ZoneGraph.Meters / 2f, x1 = x0 + ZoneGraph.Meters, z1 = z0 + ZoneGraph.Meters;
+                float best = float.PositiveInfinity;
+                foreach (var p in q.Portals)
+                    for (int end = 0; end < 2; end++)
+                    {
+                        float ex = p[end * 2], ez = p[end * 2 + 1], ox = p[2 - end * 2], oz = p[3 - end * 2];
+                        float dx = Math.Max(0f, Math.Max(x0 - ex, ex - x1)), dz = Math.Max(0f, Math.Max(z0 - ez, ez - z1));
+                        float to = sails && topProgress > 0f ? (float)Math.Sqrt(dx * dx + dz * dz) / topProgress : (Math.Max(dx, dz) + 0.41421356f * Math.Min(dx, dz)) / walk;
+                        best = Math.Min(best, to + q.PortalSeconds + Leg(ox, oz, q.GoalX, q.GoalZ, sails));
+                    }
+                portalBound[key] = best;
+                return best;
+            }
             float H(float x, float z, int phase)
             {
                 bool sails = Sails(phase);
                 float h = Leg(x, z, q.GoalX, q.GoalZ, sails);
+                if (q.Portals.Count == 0) return h;
+                if (PortalBoundPerZone) return Math.Min(h, ZoneBound(ZoneOf(x), ZoneOf(z), sails));
                 foreach (var p in q.Portals)
                     h = Math.Min(h, Math.Min(Leg(x, z, p[0], p[1], sails) + q.PortalSeconds + Leg(p[2], p[3], q.GoalX, q.GoalZ, sails), Leg(x, z, p[2], p[3], sails) + q.PortalSeconds + Leg(p[0], p[1], q.GoalX, q.GoalZ, sails)));
                 return h;
@@ -598,7 +685,73 @@ namespace ValheimNavigator
                 {
                     if (t == s || t.In == null || t.Id == VShipFoot && phase != 0) continue;
                     float c = CostAt(l, t.Zx, t.Zz, t.Local);
+                    if (PortalSpotsApart) c = Math.Min(c, CostAt(t.In, s.Zx, s.Zz, s.Local));
                     if (!float.IsInfinity(c)) Relax(t.Id, phase, g0 + c * SpotFactor(s.Zx, s.Zz), from);
+                }
+            }
+            // a portal pair's searches are made only once the search's lowest cost reaches the least time a route through it could take
+            // (5 Nov test: each end's searches took about 130 ms, 84 of them 11 s, mostly for portals no route used). the least time uses
+            // the bound's own speeds, also through chains of other portals
+            int ends = q.Portals.Count * 2;
+            // paths and floors walk up to TopPathSpeed times faster, so the foot leg is shortened by it
+            float footTop = RouteStore.TopPathSpeed;
+            float Optimistic(float x, float z, float xx, float zz) => boats ? Math.Min(Leg(x, z, xx, zz, true), Leg(x, z, xx, zz, false) / footTop) : Leg(x, z, xx, zz, false) / footTop;
+            float EndX(int e) => q.Portals[e / 2][e % 2 * 2];
+            float EndZ(int e) => q.Portals[e / 2][e % 2 * 2 + 1];
+            var reachBy = new float[ends]; var toGoal = new float[ends];
+            for (int e = 0; e < ends; e++) { reachBy[e] = Optimistic(q.StartX, q.StartZ, EndX(e), EndZ(e)); toGoal[e] = Optimistic(EndX(e), EndZ(e), q.GoalX, q.GoalZ); }
+            for (bool changed = true; changed;)
+            {
+                changed = false;
+                for (int e = 0; e < ends; e++)
+                    for (int o = 0; o < ends; o++)
+                    {
+                        if (o == e) continue;
+                        float via = (o == (e ^ 1) ? q.PortalSeconds : Optimistic(EndX(o), EndZ(o), EndX(e), EndZ(e))) + reachBy[o];
+                        if (via < reachBy[e] - 1e-3f) { reachBy[e] = via; changed = true; }
+                        float on = (o == (e ^ 1) ? q.PortalSeconds : Optimistic(EndX(e), EndZ(e), EndX(o), EndZ(o))) + toGoal[o];
+                        if (on < toGoal[e] - 1e-3f) { toGoal[e] = on; changed = true; }
+                    }
+            }
+            var pairAt = new float[q.Portals.Count];
+            for (int j = 0; j < pairAt.Length; j++) pairAt[j] = Math.Min(reachBy[j * 2] + q.PortalSeconds + toGoal[j * 2 + 1], reachBy[j * 2 + 1] + q.PortalSeconds + toGoal[j * 2]);
+            var pending = new List<int>();
+            for (int j = 0; j < pairAt.Length; j++) pending.Add(j);
+            pending.Sort((a, b) => pairAt[a].CompareTo(pairAt[b]));
+            int nextPair = 0;
+            void Activate(int j)
+            {
+                var p = q.Portals[j];
+                for (int e = 0; e < 2; e++)
+                {
+                    var t = Make(VPortal + j * 2 + e, p[e * 2], p[e * 2 + 1]);
+                    t.Out = SpotSearch(t.X, t.Z, t.Zx, t.Zz, t.Local, false); t.In = SpotSearch(t.X, t.Z, t.Zx, t.Zz, t.Local, true);
+                    // its entrance from the nodes of its block, also from those the search already reached
+                    foreach (var (zx, zz, g) in Block(t.In))
+                        for (int k = 0; k < g.Cells.Length; k++)
+                        {
+                            float c = CostAt(t.In, zx, zz, g.Cells[k]);
+                            if (g.Layers[k] != 0 || float.IsInfinity(c)) continue;
+                            long key = NodeKey(zx, zz, k);
+                            if (!into.TryGetValue(key, out var list)) into[key] = list = new List<(long, float)>();
+                            list.Add((t.Id, c));
+                            for (int ph = 0; ph < Phases; ph++)
+                                if (cost.TryGetValue(State(key, ph), out float gk)) Relax(t.Id, ph, gk + c * SpotFactor(zx, zz), State(key, ph));
+                        }
+                }
+                // the straight links from spots the search already reached (the start, other portal ends) to the new ends
+                for (int e = 0; e < 2; e++)
+                {
+                    var t = spots[VPortal + j * 2 + e];
+                    foreach (var s0 in new List<Spot>(spots.Values))
+                    {
+                        if (s0 == t || s0.Out == null || s0.Out.Layer != 0) continue;
+                        float c = CostAt(s0.Out, t.Zx, t.Zz, t.Local);
+                        if (PortalSpotsApart) c = Math.Min(c, CostAt(t.In, s0.Zx, s0.Zz, s0.Local));
+                        if (float.IsInfinity(c)) continue;
+                        for (int ph = 0; ph < Phases; ph++)
+                            if (cost.TryGetValue(State(s0.Id, ph), out float gs)) Relax(t.Id, ph, gs + c * SpotFactor(s0.Zx, s0.Zz), State(s0.Id, ph));
+                    }
                 }
             }
             Relax(VStart, 0, 0f, -1);
@@ -607,9 +760,13 @@ namespace ValheimNavigator
             float best = float.PositiveInfinity; long bestState = -1;
             // a heat-proof trip to the Ashlands crosses more landings, it may search longer before it gives up
             int cap = q.HeatProof ? Math.Max(q.MaxExpanded, HeatProofExpanded) : q.MaxExpanded;
-            while (open.Count > 0 && result.Expanded < cap)
+            SetupMs += Ms(setupAt);
+            long searchAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            while ((open.Count > 0 || nextPair < pending.Count) && result.Expanded < cap)
             {
                 if (_halted || (result.Expanded & 63) == 0 && Halt()) { result.Stopped = true; return result; }
+                if (nextPair < pending.Count && (open.Count == 0 || pairAt[pending[nextPair]] <= open[0].f) && pairAt[pending[nextPair]] < best) { Activate(pending[nextPair++]); continue; }
+                if (open.Count == 0) break;
                 var (f, s) = Pop();
                 if (f >= best) break;
                 float g0 = cost[s];
@@ -649,9 +806,10 @@ namespace ValheimNavigator
                     if (n == null) continue;
                     int nk = n.NodeAt(ZoneGraph.Across(z.Cells[k], side), layer);
                     if (nk < 0) continue;
-                    if (_dirty.Count > 0 && (_dirty.Contains(ZoneKey(zx, zz)) || _dirty.Contains(ZoneKey(nx, nz)))
-                        && CrossingClosed(WorldX(zx, z.Cells[k]), WorldZ(zz, z.Cells[k]), WorldX(nx, n.Cells[nk]), WorldZ(nz, n.Cells[nk]), layer)) continue;
+                    bool dirtyCross = _dirty.Count > 0 && (_dirty.Contains(ZoneKey(zx, zz)) || _dirty.Contains(ZoneKey(nx, nz)));
+                    if (dirtyCross && CrossingClosed(WorldX(zx, z.Cells[k]), WorldZ(zz, z.Cells[k]), WorldX(nx, n.Cells[nk]), WorldZ(nz, n.Cells[nk]), layer)) continue;
                     float c = layer == 0 ? (q.Comfort ? z.CrossOutComfort[e] : z.CrossOut[e]) * Factor(nx, nz) : (q.HeatProof ? z.CrossOutComfort[e] : z.CrossOut[e]) * SeaFactor(SideX[side], SideZ[side]);
+                    if (dirtyCross && layer == 0 && WallStep(PointAt(WorldX(zx, z.Cells[k]), WorldZ(zz, z.Cells[k])), PointAt(WorldX(nx, n.Cells[nk]), WorldZ(nz, n.Cells[nk])))) c += q.WallSeconds;
                     Relax(NodeKey(nx, nz, nk), phase, g0 + c, s);
                 }
                 if (layer == 1)
@@ -668,12 +826,15 @@ namespace ValheimNavigator
                             if (spot != VShipFoot || phase == 0) Relax(spot, phase, g0 + c * SpotFactor(zx, zz), s);
                 }
             }
+            SearchMs += Ms(searchAt);
             if (bestState < 0) return result;
-            result.Reached = true; result.Seconds = best;
+            result.Reached = true; result.Seconds = best; result.Graph = best;
             var states = new List<long>();
             for (long st = bestState; st != -1; st = parent[st]) states.Add(st);
             states.Reverse();
+            long refineAt = System.Diagnostics.Stopwatch.GetTimestamp();
             Refine(states, spots, result);
+            RefineMs += Ms(refineAt);
             if (result.Stopped) result.Reached = false;
             return result;
         }
@@ -743,7 +904,7 @@ namespace ValheimNavigator
                 if (g == null) return true;
                 return !Blocked(Points(zx, zz)[LocalOf(zx, zz, x, z)]) && !g.Blocked(LocalOf(zx, zz, x, z));
             }
-            if (Open(q.GoalX, q.GoalZ)) return;
+            if (Open(q.GoalX, q.GoalZ)) { OnCell(ref q.GoalX, ref q.GoalZ); return; }
             for (float r = ZoneGraph.Step; r <= GoalSnapMeters; r += ZoneGraph.Step)
             {
                 float bx = 0f, bz = 0f, bd = float.PositiveInfinity;
@@ -753,7 +914,7 @@ namespace ValheimNavigator
                         float x = q.GoalX + dx, z = q.GoalZ + dz, dd = dx * dx + dz * dz;
                         if (dd < bd && Open(x, z)) { bd = dd; bx = x; bz = z; }
                     }
-                if (bd < float.PositiveInfinity) { q.GoalX = bx; q.GoalZ = bz; return; }
+                if (bd < float.PositiveInfinity) { q.GoalX = bx; q.GoalZ = bz; OnCell(ref q.GoalX, ref q.GoalZ); return; }
             }
         }
 
@@ -766,7 +927,7 @@ namespace ValheimNavigator
                 int zx = ZoneOf(x), zz = ZoneOf(z);
                 return Zone(zx, zz) == null || !Blocked(Points(zx, zz)[LocalOf(zx, zz, x, z)]);
             }
-            if (Open(q.StartX, q.StartZ)) return;
+            if (Open(q.StartX, q.StartZ)) { OnCell(ref q.StartX, ref q.StartZ); return; }
             for (float r = ZoneGraph.Step; r <= GoalSnapMeters; r += ZoneGraph.Step)
             {
                 float bx = 0f, bz = 0f, bd = float.PositiveInfinity;
@@ -776,8 +937,18 @@ namespace ValheimNavigator
                         float x = q.StartX + dx, z = q.StartZ + dz, dd = dx * dx + dz * dz;
                         if (dd < bd && Open(x, z)) { bd = dd; bx = x; bz = z; }
                     }
-                if (bd < float.PositiveInfinity) { q.StartX = bx; q.StartZ = bz; return; }
+                if (bd < float.PositiveInfinity) { q.StartX = bx; q.StartZ = bz; OnCell(ref q.StartX, ref q.StartZ); return; }
             }
+        }
+
+        // a start or goal set on its open 2 m point exactly: between points the ground is blended from four, and beside lava (closed from
+        // 0.22 in 10.2.22) the first step from between them read the lava and the route could not be priced (Ashlands lab, 6 Nov)
+        private void OnCell(ref float x, ref float z)
+        {
+            int zx = ZoneOf(x), zz = ZoneOf(z);
+            if (Zone(zx, zz) == null) return;
+            int local = LocalOf(zx, zz, x, z);
+            x = WorldX(zx, local); z = WorldZ(zz, local);
         }
 
         // water at the point, and the zone marks it past the swim limit from the shallows
@@ -811,7 +982,8 @@ namespace ValheimNavigator
                 if (a >= Virtual && b >= Virtual)
                 {
                     var s = spots[a]; var t = spots[b];
-                    AddCells(s.Out, Trace(s.Out, t.Zx, t.Zz, t.Local), mode, 1);
+                    if (PortalSpotsApart && t.In != null && CostAt(t.In, s.Zx, s.Zz, s.Local) < CostAt(s.Out, t.Zx, t.Zz, t.Local)) AddCells(t.In, Trace(t.In, s.Zx, s.Zz, s.Local), mode, 1);
+                    else AddCells(s.Out, Trace(s.Out, t.Zx, t.Zz, t.Local), mode, 1);
                     if (b == VGoal || b >= VPortal) Add(t.X, t.Z, mode);
                     continue;
                 }
@@ -836,10 +1008,21 @@ namespace ValheimNavigator
                 {
                     if (pa == pb && Closes(_q) && CrossingClosed(WorldX(zx, z.Cells[k]), WorldZ(zz, z.Cells[k]), WorldX(nzx, n.Cells[nk]), WorldZ(nzz, n.Cells[nk]), z.Layers[k]))
                     { MarkDirty(zx, zz); MarkDirty(nzx, nzz); result.PlainHops++; }
+                    else if (pa == pb && z.Layers[k] == 0 && WallStep(PointAt(WorldX(zx, z.Cells[k]), WorldZ(zz, z.Cells[k])), PointAt(WorldX(nzx, n.Cells[nk]), WorldZ(nzz, n.Cells[nk]))))
+                    { MarkDirty(zx, zz); MarkDirty(nzx, nzz); }
                     Add(WorldX(nzx, n.Cells[nk]), WorldZ(nzz, n.Cells[nk]), mode); continue;
+                }
+                var hop = (ZoneKey(zx, zz), z.Cells[k], (int)z.Layers[k], n.Cells[nk]);
+                if (RefineCache && _hops.TryGetValue(hop, out var kept))
+                {
+                    if (kept.plain) { result.PlainHops++; MarkDirty(zx, zz); }
+                    if (kept.wall) MarkDirty(zx, zz);
+                    if (kept.xz != null) for (int i = 2; i < kept.xz.Length; i += 2) Add(kept.xz[i], kept.xz[i + 1], mode);
+                    continue;
                 }
                 var l = Search(zx, zz, 0, z.Cells[k], z.Layers[k], false, n.Cells[nk]);
                 var cells = Trace(l, zx, zz, n.Cells[nk]);
+                bool plainHop = false;
                 // rocks or solids close the hop inside this zone (the zone graph does not know them): this hop as the zone graph priced it
                 if (cells == null && Closes(_q))
                 {
@@ -847,10 +1030,23 @@ namespace ValheimNavigator
                     cells = Trace(l, zx, zz, n.Cells[nk]);
                     result.PlainHops++;
                     MarkDirty(zx, zz);
+                    plainHop = true;
                 }
+                bool wallHop = !plainHop && cells != null && z.Layers[k] == 0 && WallIn(l, cells);
+                if (wallHop) MarkDirty(zx, zz);
                 AddCells(l, cells, mode, 1);
+                if (RefineCache)
+                {
+                    float[] xz = null;
+                    if (cells != null) { xz = new float[cells.Count * 2]; for (int i = 0; i < cells.Count; i++) { xz[i * 2] = l.X(cells[i]); xz[i * 2 + 1] = l.Z(cells[i]); } }
+                    _hops[hop] = (xz, plainHop, wallHop);
+                }
             }
+            // a round that closed new hops is searched again, its route is not kept
+            if (StraightenLast && _newDirty && !_lastRound) { result.Points = points; return; }
+            long straightenAt = System.Diagnostics.Stopwatch.GetTimestamp();
             result.Points = Straighten(points);
+            StraightenMs += Ms(straightenAt);
             if (_halted) { result.Stopped = true; return; }
             result.Zones = zones.Count;
             result.Seconds = Price(result.Points);
@@ -864,6 +1060,9 @@ namespace ValheimNavigator
                 if (float.IsInfinity(result.Seconds)) { result.Points = points; result.Seconds = Price(points); }
                 _plain = false;
             }
+            // the walls the route goes through, their extra time only steered the search
+            result.Walls = _walls;
+            if (!float.IsInfinity(result.Seconds)) result.Seconds -= _walls * _q.WallSeconds;
             result.Points = Densify(result.Points);
         }
 
@@ -902,7 +1101,8 @@ namespace ValheimNavigator
         {
             float total = 0f;
             int boardings = 0;
-            for (int i = 1; i < path.Count; i++)
+            _walls = 0; _countWalls = true;
+            try { for (int i = 1; i < path.Count; i++)
             {
                 var a = path[i - 1]; var b = path[i];
                 float d = (float)Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Z - a.Z) * (b.Z - a.Z));
@@ -915,7 +1115,8 @@ namespace ValheimNavigator
                 else if (b.Mode == 1) total += d / SailAlong(b.X - a.X, b.Z - a.Z);
                 else if (a.Mode == 1) total += _q.SwitchSeconds;
                 else total += Walk(a, b);
-            }
+            } }
+            finally { _countWalls = false; }
             return total;
         }
 
