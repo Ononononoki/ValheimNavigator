@@ -23,6 +23,8 @@ namespace ValheimNavigator
         // a zone's ground data must stay the same this long before its zones are built again: visited ground fills in over many seconds
         // as you walk, each step moved the hash and rebuilt the zone again (30 Oct: about 1000 to 1500 rebuilds a session)
         private const float SettleSeconds = 20f;
+        // during the load warm-up a change settles this fast, so the zones are built again inside the warm-up
+        private const float WarmSettleSeconds = 2f;
         private static readonly Dictionary<long, (ulong hash, double since)> Pending = new Dictionary<long, (ulong, double)>();
         private static readonly System.Diagnostics.Stopwatch _settleClock = System.Diagnostics.Stopwatch.StartNew();
         private const float WorldEdge = 10500f;
@@ -50,6 +52,14 @@ namespace ValheimNavigator
         // while the game is paused or its menu is open nobody plays: BoostThreads more threads build the route map then
         private const int BoostThreads = 2;
         private static volatile bool _boost;
+        // the load warm-up: for LoadBoostSeconds after you enter a world every thread but two builds, the world scan takes longer slices
+        // and the rocks near you are measured at once (the user, 7 Nov: front-load the work, then back to the background pace)
+        private static volatile bool _warm;
+        internal static bool WarmUp => _warm;
+        private static WorldGenerator _warmWorld;
+        // the warm-up runs from your spawn until LoadBoostSeconds after the route map has opened its tiles (or after the spawn without it)
+        private static float _spawnAt = -1f, _openedAt = -1f;
+        private static int _warmZones;
         private static float _wantX0, _wantZ0, _wantX1, _wantZ1;
         private static long _clockUse;
         private static bool _ownTerrain;
@@ -79,6 +89,14 @@ namespace ValheimNavigator
         internal static void Tick()
         {
             var world = WorldGenerator.instance;
+            if (world != _warmWorld) { _warmWorld = world; _spawnAt = _openedAt = -1f; }
+            if (_spawnAt < 0f && world != null && Player.m_localPlayer != null) _spawnAt = Time.unscaledTime;
+            if (_openedAt < 0f && _opened && _world != null) { _openedAt = Time.unscaledTime; _warmZones = _zonesBuilt + _repaired; }
+            float since = _world != null ? (_openedAt < 0f ? 0f : Time.unscaledTime - _openedAt) : _spawnAt < 0f ? 0f : Time.unscaledTime - _spawnAt;
+            bool warm = world != null && Settings.LoadBoostSeconds.Value > 0f && since < Settings.LoadBoostSeconds.Value;
+            if (_warm && !warm && Plugin.LogCounters.Value)
+                Plugin.Log.LogInfo("load warm-up done " + (Time.unscaledTime - _spawnAt).ToString("F0") + " s after the spawn, " + Settings.LoadBoostSeconds.Value.ToString("F0") + " s after the route map opened: " + (_zonesBuilt + _repaired - _warmZones) + " route map zones built, " + Remembered.ShapeCount + " huge rock shapes, the background pace again");
+            _warm = warm;
             bool want = Plugin.Enabled.Value && world != null && ZoneSystem.instance != null && !(ZNet.instance != null && ZNet.instance.IsDedicated());
             // changed route rules (the walking and sailing settings) start the route map again, checked once a second
             bool rulesChanged = _world != null && Time.unscaledTime >= _nextStatus && RulesKey() != _rulesKey;
@@ -192,7 +210,7 @@ namespace ValheimNavigator
             int ground;
             byte source = 0;
             if (Remembered.Surface(x, z, Math.Max(height, _water), height < _water, out float top, out ground)) { height = top; surface = NavSurface.Land; speed = PathSpeed(ground); }
-            // a measured Ashlands rock is stood on, over lava too, as rough ground (RockSpeed), its points marked for the red line
+            // a rock top (measured near you or from a huge rock's shape) is stood on, over lava too, as rough ground (RockSpeed), its points marked for the red line
             else if (Remembered.RockTop(x, z, out float rock) && rock > Math.Max(height, _water)) { height = rock; surface = NavSurface.Land; speed = RockSpeed; source = RockSource; }
             else if (Remembered.Ground(x, z, out _, out ground) && height >= _water) speed = PathSpeed(ground);
             return new NavPoint { X = x, Z = z, Height = height, Surface = surface, Rank = (byte)Navigator.Rank(biome), Speed = speed, Source = source };
@@ -341,23 +359,28 @@ namespace ValheimNavigator
                     File.WriteAllText(keyFile, key);
                 }
                 foreach (var file in Directory.GetFiles(_folder, "*.tmp")) File.Delete(file);
-                foreach (var file in Directory.GetFiles(_folder, "r_*.bin"))
+                // the signatures of every zone on disk, so a zone changed since it was built is found. the tile itself is read again on demand.
+                // read on every core but two: one thread took about 40 s for the whole world, the route map and the load warm-up waited for it
+                // (7 Nov test)
+                var files = Directory.GetFiles(_folder, "r_*.bin");
+                int found = 0;
+                System.Threading.Tasks.Parallel.ForEach(files, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = Math.Max(threads, Environment.ProcessorCount - 2) }, (file, loop) =>
                 {
-                    if (generation != _generation) return;
+                    if (generation != _generation) { loop.Stop(); return; }
                     var parts = Path.GetFileNameWithoutExtension(file).Split('_');
-                    if (parts.Length != 3 || !int.TryParse(parts[1], out int tx) || !int.TryParse(parts[2], out int tz) || tx < -Half || tz < -Half || tx >= Half || tz >= Half) continue;
-                    // the signatures of every zone on disk, so a zone changed since it was built is found. the tile itself is read again on demand
+                    if (parts.Length != 3 || !int.TryParse(parts[1], out int tx) || !int.TryParse(parts[2], out int tz) || tx < -Half || tz < -Half || tx >= Half || tz >= Half) return;
                     var tile = ReadTile(tx, tz);
-                    if (tile == null) continue;
+                    if (tile == null) return;
                     lock (Gate)
                     {
                         if (generation != _generation) return;
                         int k = Index(tx, tz);
-                        if (States[k] != State.Unknown) continue;
-                        States[k] = State.Built; _built++; onDisk++;
+                        if (States[k] != State.Unknown) return;
+                        States[k] = State.Built; _built++; found++;
                         foreach (var z in tile.Zones) if (z != null) Signatures[Key(z.Zx, z.Zz)] = z.Signature;
                     }
-                }
+                });
+                onDisk = found;
             }
             catch (Exception ex)
             {
@@ -366,19 +389,22 @@ namespace ValheimNavigator
             if (generation != _generation) return;
             _opened = true;
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map started, " + onDisk + " tiles on disk, " + _inside + " tiles in the world, " + threads + " threads");
-            for (int i = 0; i < threads + BoostThreads; i++)
+            // extra threads wait until the game is paused (BoostThreads of them) or the load warm-up runs (all of them, every core but two)
+            int extra = Math.Max(BoostThreads, Environment.ProcessorCount - 2 - threads);
+            for (int i = 0; i < threads + extra; i++)
             {
-                bool boost = i >= threads;
+                int boost = i - threads;
                 new Thread(() => Work(generation, boost)) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal, Name = "ValheimNavigator route map " + i }.Start();
             }
             Check(generation);
         }
 
-        private static void Work(int generation, bool boost)
+        // boost: -1 always works, 0 and up an extra thread (the first BoostThreads also while paused)
+        private static void Work(int generation, int boost)
         {
             while (generation == _generation)
             {
-                if (boost && !_boost) { Thread.Sleep(500); continue; }
+                if (boost >= 0 && !_warm && !(_boost && boost < BoostThreads)) { Thread.Sleep(_warm ? 50 : 500); continue; }
                 int k, mask;
                 lock (Gate) k = Pick(out mask);
                 if (k < 0) { Thread.Sleep(250); continue; }
@@ -534,7 +560,7 @@ namespace ValheimNavigator
                             if (Own.TryGetValue(key, out ulong old) && old == own) { Pending.Remove(key); continue; }
                             // a new hash waits until it has stayed the same for SettleSeconds
                             if (!Pending.TryGetValue(key, out var seen) || seen.hash != own) { Pending[key] = (own, _settleClock.Elapsed.TotalSeconds); continue; }
-                            if (_settleClock.Elapsed.TotalSeconds - seen.since < SettleSeconds) continue;
+                            if (_settleClock.Elapsed.TotalSeconds - seen.since < (_warm ? WarmSettleSeconds : SettleSeconds)) continue;
                             Pending.Remove(key); Own[key] = own;
                         }
                         changed.Add(key);

@@ -12,7 +12,7 @@ namespace ValheimNavigator
     {
         public const string ModGuid = "onononoki.ValheimNavigator";
         public const string ModName = "ValheimNavigator";
-        public const string ModVersion = "0.2.2";
+        public const string ModVersion = "0.2.3";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;

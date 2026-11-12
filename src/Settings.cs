@@ -118,6 +118,7 @@ namespace ValheimNavigator
         internal static bool DetailedView => TerrainView != null && TerrainView.Value == 4;
         internal static int OverlayView => DetailedView ? 0 : TerrainView.Value;
         internal static ConfigEntry<int> FineThreads, FineMemoryMB, LivingMapMode;
+        internal static ConfigEntry<float> LoadBoostSeconds;
         internal static ConfigEntry<bool> SeaHazards;
         internal static ConfigEntry<bool> Ore;
         internal static ConfigEntry<bool> SpawnSafe;
@@ -178,6 +179,7 @@ namespace ValheimNavigator
             FineTerrain = config.Bind(Sections.Performance, "DetailedTerrain", true, "Build a 2 m terrain map from the game's world generator in the background, nearest to you first, and keep it on disk per world (BepInEx\\cache\\ValheimNavigator). Sea deeper than 5 m is left out. The panel shows the progress.");
             FineThreads = config.Bind(Sections.Performance, "DetailedTerrainThreads", 3, new ConfigDescription("Background threads that build the detailed terrain map. The game's generator gains little beyond 4.", new AcceptableValueRange<int>(1, 8)));
             FineMemoryMB = config.Bind(Sections.Performance, "DetailedTerrainMemoryMB", 64, new ConfigDescription("Memory for detailed terrain tiles near you. Farther tiles stay on disk.", new AcceptableValueRange<int>(16, 1024)));
+            LoadBoostSeconds = config.Bind(Sections.Performance, "LoadBoostSeconds", 20f, new ConfigDescription("For this long after you enter a world the route map, the world scan and the rock measuring run at full speed (more threads, longer frame slices), so the work is done while you look around. 0 turns it off.", new AcceptableValueRange<float>(0f, 120f)));
             LivingMapMode = config.Bind(Sections.MapView, "LivingMapMode", 0, new ConfigDescription("With LivingMap installed: 0 Navigator's detailed map is drawn over LivingMap's close-up view, 1 LivingMap's close-up view stays on top.", new AcceptableValueRange<int>(0, 1)));
             ArrivalSeconds = config.Bind(Sections.Performance, "ArrivalSeconds", 2f,
                 new ConfigDescription("How often the arrival check for auto mark runs.", new AcceptableValueRange<float>(0.5f, 10f)));
@@ -293,7 +295,9 @@ namespace ValheimNavigator
         }
 
         // background map work gets the larger budget while the large map is open and someone is waiting for it
-        internal static float MapBudget => Minimap.instance != null && Minimap.instance.m_mode == Minimap.MapMode.Large ? MapMilliseconds.Value : SliceMilliseconds.Value;
+        // during the load warm-up the world scan takes longer slices, so it is done in the first seconds
+        internal const float WarmMilliseconds = 25f;
+        internal static float MapBudget => RouteStore.WarmUp ? WarmMilliseconds : Minimap.instance != null && Minimap.instance.m_mode == Minimap.MapMode.Large ? MapMilliseconds.Value : SliceMilliseconds.Value;
 
         // a value kept fixed in the code, read like a setting
         internal sealed class Fixed<T> { internal readonly T Value; internal Fixed(T value) { Value = value; } }

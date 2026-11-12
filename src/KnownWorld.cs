@@ -37,6 +37,8 @@ namespace ValheimNavigator
             // a solid the route remembers: its collider box in the prefab's own frame
             internal bool Solid;
             internal Vector3 Min, Max;
+            // a rock too wide for one box (over 24 m): its top surface's shape in Remembered, -1 for none
+            internal int Shape = -1;
             // the top of its solid colliders above its origin, MinValue when it has none
             internal float Top;
             // a building piece walked on (Remembered.Floor, Remembered.Stair, else 0) and its SpeedyPaths ground type by material
@@ -54,6 +56,10 @@ namespace ValheimNavigator
         // Detailed routes: the solids of this scan as boxes, and every zone it read, so remembered zones it did not read keep theirs
         private static readonly List<Remembered.Box> PendingBoxes = new List<Remembered.Box>();
         private static readonly HashSet<long> ZonesRead = new HashSet<long>();
+        // both route details: the huge rocks of this scan and every zone it read
+        private static readonly List<Remembered.Huge> PendingHuge = new List<Remembered.Huge>();
+        private static readonly HashSet<long> HugeZonesRead = new HashSet<long>();
+        private static int _hugeSignature;
         private static int _boxSignature;
         internal static bool BoxesChanged;
         private static float _routeData = -1000f;
@@ -177,7 +183,7 @@ namespace ValheimNavigator
         {
             _manager = null; _sectors = null; _busy = _route = false; _last = _routeData = -1000f;
             Kinds.Clear(); Marks.Clear(); Ships.Clear(); Pending.Clear(); PendingShips.Clear(); Obstacles.Clear();
-            PendingBoxes.Clear(); ZonesRead.Clear(); Version++; HazardVersion++; RockVersion++;
+            PendingBoxes.Clear(); ZonesRead.Clear(); PendingHuge.Clear(); HugeZonesRead.Clear(); Version++; HazardVersion++; RockVersion++;
         }
 
         internal static void ApplySharedShips()
@@ -211,7 +217,7 @@ namespace ValheimNavigator
             }
             if (!route && Time.unscaledTime - _last < Settings.KnownRefresh.Value) return;
             Navigator.LoadRemembered();
-            _sectors = Sectors(manager); _sector = 0; _item = 0; Pending.Clear(); PendingShips.Clear(); PendingBoxes.Clear(); ZonesRead.Clear();
+            _sectors = Sectors(manager); _sector = 0; _item = 0; Pending.Clear(); PendingShips.Clear(); PendingBoxes.Clear(); ZonesRead.Clear(); PendingHuge.Clear(); HugeZonesRead.Clear();
             Problem = null;
             _busy = _sectors != null; _last = Time.unscaledTime; _scanFrames = 0; _scanMilliseconds = 0;
         }
@@ -255,6 +261,18 @@ namespace ValheimNavigator
                     // a changed set of solids is a new world for the kept route, as changed sea hazards are
                     if (boxes != _boxSignature) { _boxSignature = boxes; HazardVersion++; BoxesChanged = true; }
                     PendingBoxes.Clear(); ZonesRead.Clear();
+                }
+                if (HugeZonesRead.Count > 0)
+                {
+                    int huge = PendingHuge.Count;
+                    foreach (var h in PendingHuge) unchecked { huge += (h.X.GetHashCode() * 397 ^ h.Z.GetHashCode()) * 31 + h.Shape; }
+                    if (huge != _hugeSignature)
+                    {
+                        _hugeSignature = huge; BoxesChanged = true;
+                        Remembered.ReplaceHugeLater(HugeZonesRead, PendingHuge);
+                        if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("huge rocks: " + PendingHuge.Count + " in " + HugeZonesRead.Count + " zones read, " + Remembered.ShapeCount + " shapes");
+                    }
+                    PendingHuge.Clear(); HugeZonesRead.Clear();
                 }
                 if (_route || Settings.SeaHazards.Value) _routeData = Time.unscaledTime;
                 _busy = false; _route = false; Version++; Layers.Dirty();
@@ -303,8 +321,16 @@ namespace ValheimNavigator
                     if (rock != null && rock.m_areaRoot != null) { kind.Areas = rock.m_areaRoot.GetComponentsInChildren<Collider>(true).Length; kind.AreaHealth = rock.m_health; }
                 }
                 kind.Top = float.MinValue;
-                kind.Solid = prefab != null && SolidKind(prefab) && LocalBox(prefab, out kind.Min, out kind.Max, out kind.Top);
+                bool solidKind = prefab != null && SolidKind(prefab);
+                kind.Solid = solidKind && LocalBox(prefab, out kind.Min, out kind.Max, out kind.Top);
                 if (kind.Solid) { WalkKind(prefab, kind); TrunkOnly(prefab, kind); }
+                // a rock wider than one box allows: its top surface measured once from its colliders, the route map walks on it and around it
+                else if (solidKind && kind.Max.x >= kind.Min.x && (kind.Max.x - kind.Min.x > HugeMeters || kind.Max.z - kind.Min.z > HugeMeters)
+                    && prefab.GetComponent<Piece>() == null && prefab.GetComponentInChildren<TreeBase>(true) == null)
+                {
+                    kind.Shape = Remembered.ShapeIndex(name);
+                    if (kind.Shape < 0) kind.Shape = Navigator.MeasureShape(prefab);
+                }
                 if (kind.Hazard && prefab != null)
                     foreach (var renderer in prefab.GetComponentsInChildren<Renderer>(true))
                     {
@@ -315,6 +341,11 @@ namespace ValheimNavigator
                 Kinds.Add(hash, kind);
             }
             var position = zdo.GetPosition();
+            {
+                long zone = Remembered.ZoneOf(position.x, position.z);
+                HugeZonesRead.Add(zone);
+                if (kind.Shape >= 0) PendingHuge.Add(HugeOf(zdo, position, kind, zone));
+            }
             if (Settings.LoadedTerrain.Value)
             {
                 long zone = Remembered.ZoneOf(position.x, position.z);
@@ -440,6 +471,20 @@ namespace ValheimNavigator
             // flat litter and tiny parts are no obstacle. rock formations wider than 24 m are left to the terrain: one box would block far more
             // ground than their uneven shape covers, and in a loaded zone the real colliders decide
             return any && max.y - min.y >= 0.4f && (max.x - min.x >= 0.3f || max.z - min.z >= 0.3f) && max.x - min.x <= 24f && max.z - min.z <= 24f;
+        }
+
+        // wider than this a rock is a huge rock with its own measured shape (LocalBox leaves it out)
+        private const float HugeMeters = 24f;
+
+        private static Remembered.Huge HugeOf(ZDO zdo, Vector3 position, Kind kind, long zone)
+        {
+            var scale = zdo.GetVec3("scale", Vector3.one);
+            scale = new Vector3(Mathf.Max(0.01f, Mathf.Abs(scale.x)), Mathf.Max(0.01f, Mathf.Abs(scale.y)), Mathf.Max(0.01f, Mathf.Abs(scale.z)));
+            var axis = zdo.GetRotation() * Vector3.right;
+            float length = Mathf.Sqrt(axis.x * axis.x + axis.z * axis.z);
+            if (length < 0.01f) { axis = Vector3.right; length = 1f; }
+            return new Remembered.Huge { X = position.x, Y = position.y, Z = position.z, Cos = axis.x / length, Sin = axis.z / length, SX = scale.x, SY = scale.y, SZ = scale.z,
+                Reach = Remembered.ShapeReach(kind.Shape) * Mathf.Max(scale.x, scale.z), Shape = kind.Shape, Zone = zone };
         }
 
         // a saved object's box in the world: its position, its turn about the vertical and its scale

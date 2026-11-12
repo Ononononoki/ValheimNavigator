@@ -146,9 +146,16 @@ namespace ValheimNavigator
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route target " + name + ", " + point.x.ToString("F0") + ", " + point.z.ToString("F0"));
         }
 
+        // the frame and destination of the last Start: a map marker's menu picks the place on the Find page (which starts the route) and
+        // starts it again in the same frame, the second search only cancelled the first (6 Nov log: two "route started" lines a target)
+        private static int _startFrame = -1;
+        private static Vector3 _startTarget;
+
         internal static void Start()
         {
             if (!Destination.HasValue) { Problem = "Pick a destination first."; return; }
+            if (_startFrame == Time.frameCount && _startTarget == Destination.Value) return;
+            _startFrame = Time.frameCount; _startTarget = Destination.Value;
             StopWorker();
             if (Search != null && !Search.Finished && Search != _stoppingSearch) Search.Cancel();
             Search = null; Problem = null;
@@ -413,6 +420,9 @@ namespace ValheimNavigator
         private const float Knee = 0.6f, Head = 1.8f, Body = 0.3f, StepUp = 1f;
         // about the game's loaded area around the player (active area of zones of 64 m), and the reach of paths read from it (its corners)
         private const float LoadedMeters = 192f, KeepOpen = 26f, PathMeters = 260f;
+        // around the start, the goal, the portals and the ship the route map's solids are left out this far: 26 m let routes leave the castle
+        // through its wall (7 Nov test). castle lab: wall steps near the ends 10 to 1 or 2, the same routes within about 2 s
+        private const float RouteOpen = 8f;
         // per route: samples read from loaded zones, those with a solid above the ground, those blocked, those on a path, and their time
         internal static int LoadedSamples, SolidSamples, BlockedSamples, PathSamples;
         internal static long LoadedTicks;
@@ -694,9 +704,11 @@ namespace ValheimNavigator
 
         // the remembered world of this world, read once and before the first world scan (a later read put the file's older boxes over
         // the scan's and rebuilt the route map's zones with buildings)
+        // in both route details: the rock tops and the huge rocks it keeps are part of the route map, Fast walks around them too (the user,
+        // 7 Nov), the solids as walls stay Detailed only
         internal static void LoadRemembered()
         {
-            if (ZNet.instance == null || !Settings.LoadedTerrain.Value) return;
+            if (ZNet.instance == null) return;
             long uid = ZNet.instance.GetWorldUID();
             if (uid == _worldUid) return;
             _worldUid = uid; _rememberedDirty = false;
@@ -710,7 +722,7 @@ namespace ValheimNavigator
 
         private static void RememberTick()
         {
-            if (ZNet.instance == null || !Settings.LoadedTerrain.Value) return;
+            if (ZNet.instance == null) return;
             LoadRemembered();
             if (KnownWorld.BoxesChanged) { KnownWorld.BoxesChanged = false; _rememberedDirty = true; }
             if (Time.unscaledTime >= _snapshotNext && ZoneSystem.instance != null && Player.m_localPlayer != null)
@@ -731,16 +743,18 @@ namespace ValheimNavigator
                         _rememberedDirty = true;
                         return;
                     }
-                // the Ashlands rocks near you, measured once a zone, so the route map walks over their tops (one zone a tick)
+                // the rocks near you, measured once a zone and again when its objects change, so the route map walks over their tops and
+                // around their sides (one zone a tick)
                 for (int dz = -SnapshotReach; dz <= SnapshotReach; dz++)
                     for (int dx = -SnapshotReach; dx <= SnapshotReach; dx++)
                     {
                         var center = ZoneSystem.GetZonePos(new Vector2s(home.x + dx, home.y + dz));
                         long key = Remembered.ZoneOf(center.x, center.z);
-                        if (Remembered.TopsCurrent(key) || !AshlandsZone(center) || !Settled(center.x, center.z, ZoneKey(center.x, center.z))) continue;
+                        if (Remembered.TopsCurrent(key) || !Settled(center.x, center.z, ZoneKey(center.x, center.z))) continue;
                         TakeTops(key);
                         _rememberedDirty = true;
-                        return;
+                        // the load warm-up measures every zone near you at once
+                        if (!RouteStore.WarmUp) return;
                     }
             }
             if (_rememberedDirty && Time.unscaledTime >= _saveNext)
@@ -775,20 +789,9 @@ namespace ValheimNavigator
             if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("remembered the terrain of zone " + (int)(key >> 32) + ", " + (int)(uint)key + " (" + Remembered.SnapshotCount + " zones)");
         }
 
-        // a zone with any Ashlands ground: its center or a corner
-        private static bool AshlandsZone(Vector3 center)
-        {
-            if (WorldGenerator.instance == null) return false;
-            for (int k = 0; k < 5; k++)
-            {
-                float x = center.x + (k == 0 ? 0f : k % 2 == 0 ? 30f : -30f), z = center.z + (k == 0 ? 0f : k < 3 ? 30f : -30f);
-                if (WorldGenerator.instance.GetBiome(x, z) == Heightmap.Biome.AshLands) return true;
-            }
-            return false;
-        }
-
-        // a rock top counts this far above the ground (lower stones are stepped over as ground)
-        private const float RockAbove = 0.3f;
+        // a rock top counts this far above the ground: in the Ashlands any stone over the lava, elsewhere only big rocks (lower stones are
+        // stepped over as ground and would color the line red everywhere)
+        private const float RockAbove = 0.3f, BigRockAbove = 1.5f;
         private static readonly RaycastHit[] TopHits = new RaycastHit[8];
 
         // the zone's rock tops on the 2 m grid: a line straight down onto the static solids (no terrain, no building pieces, no trees or
@@ -806,6 +809,7 @@ namespace ValheimNavigator
                     int k = j * Remembered.Side + i;
                     tops[k] = float.NaN;
                     if (!Heightmap.GetHeight(new Vector3(x, 0f, z), out float ground)) continue;
+                    float above = WorldGenerator.instance != null && WorldGenerator.instance.GetBiome(x, z) == Heightmap.Biome.AshLands ? RockAbove : BigRockAbove;
                     int count = Physics.RaycastNonAlloc(new Vector3(x, ground + 80f, z), Vector3.down, TopHits, 80f, mask, QueryTriggerInteraction.Ignore);
                     float best = float.NaN;
                     for (int h = 0; h < count; h++)
@@ -813,12 +817,66 @@ namespace ValheimNavigator
                         var c = TopHits[h].collider;
                         if (c == null || c.attachedRigidbody != null || c.GetComponentInParent<TreeBase>() != null || c.GetComponentInParent<Character>() != null || c.GetComponentInParent<Piece>() != null) continue;
                         float y = TopHits[h].point.y;
-                        if (y > ground + RockAbove && (float.IsNaN(best) || y > best)) best = y;
+                        if (y > ground + above && (float.IsNaN(best) || y > best)) best = y;
                     }
                     if (!float.IsNaN(best)) { tops[k] = best; found++; }
                 }
             Remembered.StoreTops(key, tops);
-            if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("remembered the rocks of Ashlands zone " + (int)(key >> 32) + ", " + (int)(uint)key + ": " + found + " of " + tops.Length + " points on a rock");
+            if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("remembered the rocks of zone " + (int)(key >> 32) + ", " + (int)(uint)key + ": " + found + " of " + tops.Length + " points on a rock");
+        }
+
+        // a huge rock's top surface from its own colliders, once a kind: a copy without its scripts (no Awake, no network object) stands far
+        // below the world, lines straight down every 1 m read its top. -1 when it has no colliders or the copy fails
+        private const float ShapeDepth = -6000f;
+        private const int ShapeMaxCells = 160;
+        private static readonly RaycastHit[] ShapeHits = new RaycastHit[32];
+
+        internal static int MeasureShape(GameObject prefab)
+        {
+            GameObject holder = null;
+            try
+            {
+                holder = new GameObject("ValheimNavigator_shape");
+                holder.SetActive(false);
+                holder.transform.position = new Vector3(0f, ShapeDepth, 0f);
+                var copy = UnityEngine.Object.Instantiate(prefab, holder.transform);
+                copy.transform.localPosition = Vector3.zero; copy.transform.localRotation = Quaternion.identity; copy.transform.localScale = Vector3.one;
+                foreach (var script in copy.GetComponentsInChildren<MonoBehaviour>(true)) if (script != null) UnityEngine.Object.DestroyImmediate(script);
+                foreach (var body in copy.GetComponentsInChildren<Rigidbody>(true)) if (body != null) UnityEngine.Object.DestroyImmediate(body);
+                holder.SetActive(true);
+                Physics.SyncTransforms();
+                var colliders = copy.GetComponentsInChildren<Collider>();
+                bool any = false; var bounds = new Bounds();
+                foreach (var c in colliders) { if (c.isTrigger) continue; if (!any) { bounds = c.bounds; any = true; } else bounds.Encapsulate(c.bounds); }
+                if (!any) return -1;
+                var origin = holder.transform.position;
+                float minX = Mathf.Floor(bounds.min.x - origin.x), minZ = Mathf.Floor(bounds.min.z - origin.z);
+                int w = Mathf.Min(ShapeMaxCells, Mathf.CeilToInt(bounds.max.x - origin.x - minX) + 1), h = Mathf.Min(ShapeMaxCells, Mathf.CeilToInt(bounds.max.z - origin.z - minZ) + 1);
+                var top = new float[w * h];
+                float from = bounds.max.y + 2f, length = bounds.size.y + 4f;
+                int found = 0;
+                for (int j = 0; j < h; j++)
+                    for (int i = 0; i < w; i++)
+                    {
+                        float best = float.NaN;
+                        int count = Physics.RaycastNonAlloc(new Vector3(origin.x + minX + i, from, origin.z + minZ + j), Vector3.down, ShapeHits, length, ~0, QueryTriggerInteraction.Ignore);
+                        for (int k = 0; k < count; k++)
+                        {
+                            var c = ShapeHits[k].collider;
+                            if (c == null || !c.transform.IsChildOf(copy.transform)) continue;
+                            float y = ShapeHits[k].point.y - origin.y;
+                            if (float.IsNaN(best) || y > best) best = y;
+                        }
+                        top[j * w + i] = best;
+                        if (!float.IsNaN(best)) found++;
+                    }
+                if (found == 0) return -1;
+                int index = Remembered.AddShape(new Remembered.Shape { Name = prefab.name, MinX = minX, MinZ = minZ, W = w, H = h, Top = top });
+                if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("huge rock shape " + prefab.name + ": " + w + " x " + h + " m, " + found + " points on it");
+                return index;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("huge rock shape " + prefab.name + " could not be measured: " + ex.Message); return -1; }
+            finally { if (holder != null) UnityEngine.Object.DestroyImmediate(holder); }
         }
 
         internal static string ShipName;
@@ -870,7 +928,7 @@ namespace ValheimNavigator
             var q = new RouteQuery.Request
             {
                 StartX = px, StartZ = pz, GoalX = gx, GoalZ = gz, Comfort = options.Comfortable,
-                PortalSeconds = options.PortalSeconds, SwitchSeconds = options.SwitchSeconds, BuildSeconds = options.BuildSeconds, OpenMeters = KeepOpen,
+                PortalSeconds = options.PortalSeconds, SwitchSeconds = options.SwitchSeconds, BuildSeconds = options.BuildSeconds, OpenMeters = RouteOpen,
                 BuildBoat = options.BuildBoat, MoreBoats = options.BuildBoat && options.MoreBoats, ExtraBoatSeconds = options.ExtraBoatSeconds, HasShip = options.HasShip, ShipX = options.ShipX, ShipZ = options.ShipZ, HeatProof = options.HeatProof,
                 Stop = () => _stopWorker
             };
@@ -1159,6 +1217,19 @@ namespace ValheimNavigator
                     Layers.Dirty();
                     return;
                 }
+                // the goal or the start shut in (lava, cliffs, deep water all around): said so, the grid search would only wander for minutes
+                // on the game thread and lead through the lava (6 Nov test)
+                if (Search.Finished && Search.GraphFailed && Search.ShutIn != 0)
+                {
+                    if (Plugin.LogCounters.Value) Plugin.Log.LogInfo("route map: the " + (Search.ShutIn == 1 ? "destination" : "start") + " is shut in, no way out (" + Search.GraphNote + ")");
+                    int shut = Search.ShutIn;
+                    var at = shut == 1 || Player.m_localPlayer == null ? Destination.Value : Player.m_localPlayer.transform.position;
+                    bool lava = Ashlands(at);
+                    Search = null; _running = false;
+                    Problem = (lava ? "Cut off by lava. " : "Cut off. ") + (shut == 1 ? "No way there" : "No way out of here") + (lava ? " without crossing lava: jump a narrow stream or cool it." : " on foot: cliffs or water all around it.");
+                    Layers.Dirty();
+                    return;
+                }
                 if (Search.Finished && Search.GraphFailed)
                 {
                     _skipGraph = true; GraphFallbacks++; _skipKey = _graphKey;
@@ -1422,7 +1493,7 @@ namespace ValheimNavigator
             for (int i = 1; i < points.Count; i++)
                 if (points[i].Mode == 2) { open.Add(new Vector2(points[i - 1].X, points[i - 1].Z)); open.Add(new Vector2(points[i].X, points[i].Z)); }
                 else if (points[i].Mode != points[i - 1].Mode) open.Add(new Vector2(points[i].X, points[i].Z));
-            bool Near(NavPoint p) { foreach (var o in open) if (NavSearch.Distance(p.X, p.Z, o.x, o.y) <= KeepOpen) return true; return false; }
+            bool Near(NavPoint p) { foreach (var o in open) if (NavSearch.Distance(p.X, p.Z, o.x, o.y) <= RouteOpen) return true; return false; }
             NavPoint At(NavPoint p) { var s = RouteStore.Sample(2 * Mathf.RoundToInt(p.X * 0.5f), 2 * Mathf.RoundToInt(p.Z * 0.5f)); s.X = p.X; s.Z = p.Z; return s; }
             for (int i = 1; i < points.Count; i++)
             {
@@ -1525,7 +1596,7 @@ namespace ValheimNavigator
             _status.textWrappingMode = TextWrappingModes.Normal;
             var legend = Ui.Label(parent, "Legend", 0f, 450f, Panel.PageWidth, 90f, 11f, TextAlignmentOptions.TopLeft, Ui.Dim);
             legend.textWrappingMode = TextWrappingModes.Normal;
-            legend.text = "Line color: green flat, brown steep, red over Ashlands rocks, dark blue sailing, light blue swimming or wading, magenta boiling Ashlands water, violet rings mark the portals to take. Boat: Build at the best shore, or walk to your Nearest ship.\nSpires, sea rocks, trees and buildings can block a route. Travel time is an estimate.";
+            legend.text = "Line color: green flat, brown steep, red over big rocks, dark blue sailing, light blue swimming or wading, magenta boiling Ashlands water, violet rings mark the portals to take. Boat: Build at the best shore, or walk to your Nearest ship.\nSpires, sea rocks, trees and buildings can block a route. Travel time is an estimate.";
         }
 
         internal override void Show() { _mode.Refresh(); _sail.Refresh(); _boat.Refresh(); _more.Refresh(); _detail.Refresh(); _ore.Refresh(); Frame(); }

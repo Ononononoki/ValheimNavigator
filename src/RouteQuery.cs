@@ -72,6 +72,8 @@ namespace ValheimNavigator
             internal int Walls;
             // searches again with zones priced for their rocks and solids
             internal int Repairs;
+            // 1 the goal, 2 the start is shut in within its search block (lava, cliffs or water past the swim limit all around it), no way
+            internal int ShutIn;
             // the search's own time of the route on the zone graph, before it is refined and priced (the lab compares them)
             internal float Graph;
             // nodes expanded in each phase (on foot, sailing, on foot after landing, the second boat, on foot after it)
@@ -529,6 +531,29 @@ namespace ValheimNavigator
             return float.IsInfinity(FootStep(a, b, ZoneGraph.Step, _q.Comfort));
         }
 
+        // the spot's block search reaches none of the block's edge, no shore a boat lands at, the other end is not reached inside it, and no
+        // portal end or ship lies in the block
+        private bool ShutIn(Local l, float ox, float oz, Request q)
+        {
+            if (l == null) return false;
+            bool Inside(float x, float z) => l.Holds(ZoneOf(x), ZoneOf(z));
+            if (Inside(ox, oz)) return false;
+            if (q.HasShip && Inside(q.ShipX, q.ShipZ)) return false;
+            foreach (var p in q.Portals) if (Inside(p[0], p[1]) || Inside(p[2], p[3])) return false;
+            int n = l.N;
+            for (int i = 0; i < n; i++)
+                if (!float.IsInfinity(l.Cost[i]) || !float.IsInfinity(l.Cost[(n - 1) * n + i]) || !float.IsInfinity(l.Cost[i * n]) || !float.IsInfinity(l.Cost[i * n + n - 1])) return false;
+            for (int bz = 0; bz < l.Span; bz++)
+                for (int bx = 0; bx < l.Span; bx++)
+                {
+                    var g = Zone(l.Bzx + bx, l.Bzz + bz);
+                    if (g == null) return false;
+                    for (int k = 0; k < g.Cells.Length; k++)
+                        if (g.Layers[k] == 0 && g.ShoreOfFoot(k) >= 0 && !float.IsInfinity(CostAt(l, l.Bzx + bx, l.Bzz + bz, g.Cells[k]))) return false;
+                }
+            return true;
+        }
+
         private Result FindOnce(Request q)
         {
             _q = q; _halted = false;
@@ -553,6 +578,10 @@ namespace ValheimNavigator
             var start = Make(VStart, q.StartX, q.StartZ); start.Out = Search(start.Zx, start.Zz, reach, start.Local, 0, false);
             var goal = Make(VGoal, q.GoalX, q.GoalZ); goal.In = Search(goal.Zx, goal.Zz, reach, goal.Local, 0, true);
             _outThere = Zone(start.Zx, start.Zz)?.Blocked(start.Local) == true || Zone(goal.Zx, goal.Zz)?.Blocked(goal.Local) == true;
+            // a goal or a start shut in within its block has no way out: said at once, not after a search of the whole world (6 Nov test: a
+            // Charred spawner cut off by lava, 1,000,000 nodes and 35 s)
+            if (ShutIn(goal.In, q.StartX, q.StartZ, q)) { result.ShutIn = 1; return result; }
+            if (ShutIn(start.Out, q.GoalX, q.GoalZ, q)) { result.ShutIn = 2; return result; }
             // the portal ends are searched later, when the search reaches a cost at which their pair could help (Activate)
             Spot shipFoot = null, shipSea = null;
             if (q.HasShip)

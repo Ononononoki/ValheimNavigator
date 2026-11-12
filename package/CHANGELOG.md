@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3
+
+- Routes go around huge rocks (Mistlands and Ashlands cliffs, big boulders, ice), in Fast and Detailed, also where you have not been yet. Rocks near you are measured in every biome, a route over one is drawn red.
+- A place cut off by lava says so at once, without a long search.
+- Routes leave buildings through their gates and doors, not through the walls next to you.
+- The route map is ready a few seconds after you load in. For 20 s after that it finishes its work at full speed (`LoadBoostSeconds`, 0 turns it off), so the game may be slower for a moment.
+- The route map is built again once after the update.
+
 ## 0.2.2
 
 - Routes are found much faster, through portals 3 to 4 times faster.

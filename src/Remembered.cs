@@ -62,7 +62,7 @@ namespace ValheimNavigator
 
         internal static void Clear()
         {
-            lock (Gate) { BoxesByCell = new Dictionary<long, List<Box>>(); BoxesByZone.Clear(); Snapshots.Clear(); Tops = new Dictionary<long, float[]>(); TopsBoxes.Clear(); _walkBoxHashes = new Dictionary<long, ulong>(); WalkHashes = new Dictionary<long, ulong>(); BoxCount = 0; Version++; }
+            lock (Gate) { BoxesByCell = new Dictionary<long, List<Box>>(); BoxesByZone.Clear(); Snapshots.Clear(); Tops = new Dictionary<long, float[]>(); TopsBoxes.Clear(); HugeByZone.Clear(); HugeByCell = new Dictionary<long, List<Huge>>(); Shapes = new Shape[0]; _walkBoxHashes = new Dictionary<long, ulong>(); WalkHashes = new Dictionary<long, ulong>(); BoxCount = 0; Version++; }
         }
 
         // a scan's boxes replace the remembered ones of every zone it read, zones it did not read keep theirs
@@ -153,6 +153,19 @@ namespace ValheimNavigator
                 if (paint == 0UL) continue;
                 hashes[pair.Key] = hashes.TryGetValue(pair.Key, out ulong h) ? Mix(h, paint) : paint;
             }
+            // the huge rocks, in every zone they reach, so the route map builds those zones again when they change
+            foreach (var list in HugeByZone.Values)
+                foreach (var h in list)
+                {
+                    ulong v = Mix(Mix(Mix(1469598103934665603UL, (ulong)BitConverter.DoubleToInt64Bits(h.X)), (ulong)BitConverter.DoubleToInt64Bits(h.Z)), (ulong)BitConverter.DoubleToInt64Bits(h.Y) ^ (ulong)h.Shape);
+                    long a = ZoneOf(h.X - h.Reach, h.Z - h.Reach), b = ZoneOf(h.X + h.Reach, h.Z + h.Reach);
+                    for (int zz = (int)(uint)a; zz <= (int)(uint)b; zz++)
+                        for (int zx = (int)(a >> 32); zx <= (int)(b >> 32); zx++)
+                        {
+                            long key = Key(zx, zz);
+                            unchecked { hashes[key] = hashes.TryGetValue(key, out ulong old) ? old + v : v; }
+                        }
+                }
             // the rock tops, so the route map builds a zone again when its rocks are measured
             foreach (var pair in Tops)
             {
@@ -196,14 +209,128 @@ namespace ValheimNavigator
         {
             top = 0f;
             var tops = Tops;
-            if (tops.Count == 0) return false;
             long zone = ZoneOf(x, z);
-            if (!tops.TryGetValue(zone, out var t)) return false;
+            // a zone measured near you has its real tops, a zone not measured yet the tops of its huge rocks' shapes
+            if (!tops.TryGetValue(zone, out var t)) return HugeTop(x, z, out top);
             int zx = (int)(zone >> 32), zz = (int)(uint)zone;
             int i = Math.Max(0, Math.Min(Side - 1, (int)Math.Round((x - (zx * ZoneSize - ZoneSize / 2f)) / Step)));
             int j = Math.Max(0, Math.Min(Side - 1, (int)Math.Round((z - (zz * ZoneSize - ZoneSize / 2f)) / Step)));
             top = t[j * Side + i];
             return !float.IsNaN(top);
+        }
+
+        // ---- huge rocks ----
+
+        // a huge rock's top surface in its own frame on a 1 m grid (unscaled), NaN where it has none, measured once a kind from its colliders
+        internal sealed class Shape
+        {
+            internal string Name;
+            internal float MinX, MinZ;
+            internal int W, H;
+            internal float[] Top;
+        }
+
+        // a huge rock of the saved world: its place, its turn about the vertical, its scale, its shape and how far it reaches from its place
+        internal struct Huge
+        {
+            internal float X, Y, Z, Cos, Sin, SX, SY, SZ, Reach;
+            internal int Shape;
+            internal long Zone;
+        }
+
+        private static volatile Shape[] Shapes = new Shape[0];
+        private static readonly Dictionary<long, List<Huge>> HugeByZone = new Dictionary<long, List<Huge>>();
+        private static volatile Dictionary<long, List<Huge>> HugeByCell = new Dictionary<long, List<Huge>>();
+
+        internal static int ShapeIndex(string name)
+        {
+            var shapes = Shapes;
+            for (int i = 0; i < shapes.Length; i++) if (shapes[i].Name == name) return i;
+            return -1;
+        }
+
+        internal static int AddShape(Shape shape)
+        {
+            lock (Gate)
+            {
+                var shapes = new Shape[Shapes.Length + 1];
+                Array.Copy(Shapes, shapes, Shapes.Length); shapes[shapes.Length - 1] = shape;
+                Shapes = shapes;
+                return shapes.Length - 1;
+            }
+        }
+
+        // how far a shape reaches from its place at scale 1
+        internal static float ShapeReach(int index)
+        {
+            var s = Shapes[index];
+            float x = Math.Max(Math.Abs(s.MinX), Math.Abs(s.MinX + s.W)), z = Math.Max(Math.Abs(s.MinZ), Math.Abs(s.MinZ + s.H));
+            return (float)Math.Sqrt(x * x + z * z);
+        }
+
+        // a scan's huge rocks replace the remembered ones of every zone it read, on a background thread
+        internal static void ReplaceHugeLater(ICollection<long> zonesRead, List<Huge> huge)
+        {
+            var zones = new List<long>(zonesRead); var copy = new List<Huge>(huge);
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    lock (Gate)
+                    {
+                        foreach (long zone in zones) HugeByZone.Remove(zone);
+                        foreach (var h in copy)
+                        {
+                            if (!HugeByZone.TryGetValue(h.Zone, out var list)) HugeByZone[h.Zone] = list = new List<Huge>();
+                            list.Add(h);
+                        }
+                        RebuildHuge(); JoinWalkHashes(); Version++;
+                    }
+                }
+                catch (Exception) { }
+            });
+        }
+
+        // under Gate: the huge rocks by 32 m cell, every cell their reach covers
+        private static void RebuildHuge()
+        {
+            var cells = new Dictionary<long, List<Huge>>();
+            foreach (var list in HugeByZone.Values)
+                foreach (var h in list)
+                {
+                    int x0 = (int)Math.Floor((h.X - h.Reach) / BoxCell), x1 = (int)Math.Floor((h.X + h.Reach) / BoxCell);
+                    int z0 = (int)Math.Floor((h.Z - h.Reach) / BoxCell), z1 = (int)Math.Floor((h.Z + h.Reach) / BoxCell);
+                    for (int cz = z0; cz <= z1; cz++)
+                        for (int cx = x0; cx <= x1; cx++)
+                        {
+                            long key = Key(cx, cz);
+                            if (!cells.TryGetValue(key, out var cell)) cells[key] = cell = new List<Huge>();
+                            cell.Add(h);
+                        }
+                }
+            HugeByCell = cells;
+        }
+
+        internal static int ShapeCount => Shapes.Length;
+
+        // the highest huge rock top at a point, false where none covers it
+        private static bool HugeTop(float x, float z, out float top)
+        {
+            top = float.MinValue;
+            var cells = HugeByCell; var shapes = Shapes;
+            if (cells.Count == 0 || !cells.TryGetValue(Key((int)Math.Floor(x / BoxCell), (int)Math.Floor(z / BoxCell)), out var cell)) return false;
+            foreach (var h in cell)
+            {
+                if (h.Shape < 0 || h.Shape >= shapes.Length) continue;
+                var s = shapes[h.Shape];
+                float dx = x - h.X, dz = z - h.Z;
+                float lx = (dx * h.Cos + dz * h.Sin) / h.SX, lz = (-dx * h.Sin + dz * h.Cos) / h.SZ;
+                int i = (int)Math.Round(lx - s.MinX), j = (int)Math.Round(lz - s.MinZ);
+                if (i < 0 || j < 0 || i >= s.W || j >= s.H) continue;
+                float t = s.Top[j * s.W + i];
+                if (!float.IsNaN(t)) top = Math.Max(top, h.Y + t * h.SY);
+            }
+            return top > float.MinValue;
         }
 
         // the walked piece under a point as the route map stands on it: a stair (at its middle height, it rises across its box) before a
@@ -335,8 +462,8 @@ namespace ValheimNavigator
 
         // 2: boxes without the parts above a standing player (tree crowns). 3: each box with its walk kind and ground type, a version 2 file
         // is still read (its boxes walk nothing until the world scan replaces them, its snapshots are kept). 4: the Ashlands rock tops after
-        // the snapshots, older files are read without them
-        private const int FileVersion = 4;
+        // the snapshots, older files are read without them. 5: the huge rocks' shapes and places after the tops
+        private const int FileVersion = 5;
 
         internal static void Save(string path)
         {
@@ -362,6 +489,15 @@ namespace ValheimNavigator
                 var tops = Tops;
                 w.Write(tops.Count);
                 foreach (var pair in tops) { w.Write(pair.Key); foreach (float t in pair.Value) w.Write(t); }
+                var shapes = Shapes;
+                w.Write(shapes.Length);
+                foreach (var sh in shapes) { w.Write(sh.Name); w.Write(sh.MinX); w.Write(sh.MinZ); w.Write(sh.W); w.Write(sh.H); foreach (float t in sh.Top) w.Write(t); }
+                w.Write(HugeByZone.Count);
+                foreach (var pair in HugeByZone)
+                {
+                    w.Write(pair.Key); w.Write(pair.Value.Count);
+                    foreach (var h in pair.Value) { w.Write(h.X); w.Write(h.Y); w.Write(h.Z); w.Write(h.Cos); w.Write(h.Sin); w.Write(h.SX); w.Write(h.SY); w.Write(h.SZ); w.Write(h.Reach); w.Write(h.Shape); }
+                }
             }
             if (File.Exists(path)) File.Delete(path);
             File.Move(temp, path);
@@ -376,7 +512,7 @@ namespace ValheimNavigator
             using (var r = new BinaryReader(File.OpenRead(path)))
             {
                 int version = r.ReadInt32();
-                if (version != FileVersion && version != 2 && version != 3) return false;
+                if (version != FileVersion && version != 2 && version != 3 && version != 4) return false;
                 int zones = r.ReadInt32();
                 for (int z = 0; z < zones; z++)
                 {
@@ -410,6 +546,28 @@ namespace ValheimNavigator
                         tops[zone] = t;
                     }
                     Tops = tops;
+                }
+                if (version >= 5)
+                {
+                    var shapes = new Shape[r.ReadInt32()];
+                    for (int i = 0; i < shapes.Length; i++)
+                    {
+                        var sh = new Shape { Name = r.ReadString(), MinX = r.ReadSingle(), MinZ = r.ReadSingle(), W = r.ReadInt32(), H = r.ReadInt32() };
+                        sh.Top = new float[sh.W * sh.H];
+                        for (int k = 0; k < sh.Top.Length; k++) sh.Top[k] = r.ReadSingle();
+                        shapes[i] = sh;
+                    }
+                    Shapes = shapes;
+                    int hugeZones = r.ReadInt32();
+                    for (int z = 0; z < hugeZones; z++)
+                    {
+                        long zone = r.ReadInt64(); int count = r.ReadInt32();
+                        var list = new List<Huge>(count);
+                        for (int i = 0; i < count; i++)
+                            list.Add(new Huge { X = r.ReadSingle(), Y = r.ReadSingle(), Z = r.ReadSingle(), Cos = r.ReadSingle(), Sin = r.ReadSingle(), SX = r.ReadSingle(), SY = r.ReadSingle(), SZ = r.ReadSingle(), Reach = r.ReadSingle(), Shape = r.ReadInt32(), Zone = zone });
+                        HugeByZone[zone] = list;
+                    }
+                    RebuildHuge();
                 }
                 RebuildCells();
             }

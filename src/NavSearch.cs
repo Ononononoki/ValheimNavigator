@@ -709,6 +709,8 @@ namespace ValheimNavigator
         private readonly Func<RouteQuery.Result> _query;
         // the route map found no way, the caller searches again with the grid
         internal bool GraphFailed;
+        // the route map found the goal (1) or the start (2) shut in, no way out of its block
+        internal int ShutIn;
         internal string GraphNote;
         // the route map found a way only with rocks, solids and the danger rule left out
         internal bool GraphPlain;
@@ -730,7 +732,7 @@ namespace ValheimNavigator
             GraphNote = "route map " + result.Expanded + " nodes, " + result.Zones + " zones, " + clock.Elapsed.TotalMilliseconds.ToString("F0") + " ms"
                 + (result.Repairs > 0 ? ", " + result.Repairs + " repair rounds" : "") + (result.PlainHops > 0 ? ", " + result.PlainHops + " hops past rocks or solids" : "") + (result.Plain ? ", rocks, solids and danger left out" : "")
                 + (result.Walls > 0 ? ", " + result.Walls + " steps through walls" : "") + (result.Parts != null ? " (" + result.Parts + ")" : "");
-            if (!result.Reached || result.Points.Count < 2) { GraphFailed = true; Finished = true; return; }
+            if (!result.Reached || result.Points.Count < 2) { GraphFailed = true; ShutIn = result.ShutIn; Finished = true; return; }
             GraphPlain = result.Plain || result.PlainHops > 0;
             GraphWalls = result.Walls;
             Points.AddRange(result.Points);
